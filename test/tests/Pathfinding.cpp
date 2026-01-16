@@ -251,3 +251,111 @@ INSTANTIATE_TEST_SUITE_P(
         SimplePathfindingScenario("PathWithFences", { 11, 6, 14 }, 10000),
         SimplePathfindingScenario("PathWithCliff", { 7, 17, 14 }, 10000)),
     SimplePathfindingScenario::ToName);
+
+// Test scenarios for sloped paths - these use existing test park infrastructure
+// that includes slopes (StraightUpSlope, StraightUpBridge paths)
+class SlopedPathfindingTest : public PathfindingTestBase
+{
+};
+
+// Test that guests can navigate up a sloped path to reach a ride entrance
+TEST_F(SlopedPathfindingTest, GuestCanNavigateUpSlope)
+{
+    // Uses the existing StraightUpSlope scenario which has a sloped path
+    TileCoordsXYZ pos{ 14, 15, 14 };
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, pos);
+
+    auto ride = FindRideByName("StraightUpSlope");
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    // Verify the goal is at a different Z level (proving there's elevation change)
+    EXPECT_NE(pos.z, goal.z);
+
+    EXPECT_TRUE(FindPath(&pos, goal, 24, ride->id));
+}
+
+// Test that guests can navigate paths that go under a bridge (different Z levels)
+TEST_F(SlopedPathfindingTest, GuestCanNavigateUnderBridge)
+{
+    // Uses the existing StraightUpBridge scenario
+    TileCoordsXYZ pos{ 12, 15, 14 };
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, pos);
+
+    auto ride = FindRideByName("StraightUpBridge");
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    EXPECT_TRUE(FindPath(&pos, goal, 24, ride->id));
+}
+
+// Test scenarios for destination reaching - verifying guests reach exact positions
+class DestinationReachingTest : public PathfindingTestBase
+{
+};
+
+// Test that a guest reaches the exact tile in front of a ride entrance
+TEST_F(DestinationReachingTest, GuestReachesExactEntranceTile)
+{
+    TileCoordsXYZ pos{ 19, 15, 14 };
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, pos);
+
+    auto ride = FindRideByName("StraightFlat");
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    EXPECT_TRUE(FindPath(&pos, goal, 24, ride->id));
+    // After FindPath, pos should be updated to the final position
+    EXPECT_EQ(pos, goal);
+}
+
+// Test short path navigation (2-3 tiles) to verify close-range pathfinding
+TEST_F(DestinationReachingTest, GuestNavigatesShortPath)
+{
+    // Use StraightFlat which has a short, direct path
+    TileCoordsXYZ pos{ 19, 15, 14 };
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, pos);
+
+    auto ride = FindRideByName("StraightFlat");
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    // This is a short path - should complete quickly
+    EXPECT_TRUE(FindPath(&pos, goal, 24, ride->id));
+}
+
+// Test that guests at elevation changes (slopes) reach the correct Z coordinate
+TEST_F(DestinationReachingTest, GuestReachesCorrectElevation)
+{
+    TileCoordsXYZ pos{ 14, 15, 14 };
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, pos);
+
+    auto ride = FindRideByName("StraightUpSlope");
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    EXPECT_TRUE(FindPath(&pos, goal, 24, ride->id));
+
+    // Verify the guest ended up at the correct Z level
+    EXPECT_EQ(pos.z, goal.z);
+}

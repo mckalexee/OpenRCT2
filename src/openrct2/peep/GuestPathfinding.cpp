@@ -40,9 +40,9 @@ namespace OpenRCT2::PathFinding
 {
     // The search limits the maximum junctions by certain conditions.
     // Increased from original RCT2 values to improve pathfinding on larger/complex maps.
-    static constexpr uint8_t kMaxJunctionsStaff = 10;
-    static constexpr uint8_t kMaxJunctionsGuest = 7;
-    static constexpr uint8_t kMaxJunctionsGuestWithMap = 9;
+    static constexpr uint8_t kMaxJunctionsStaff = 12;
+    static constexpr uint8_t kMaxJunctionsGuest = 9;
+    static constexpr uint8_t kMaxJunctionsGuestWithMap = 11;
     static constexpr uint8_t kMaxJunctionsGuestLeavingPark = 10;
     static constexpr uint8_t kMaxJunctionsGuestLeavingParkLost = 12;
 
@@ -1770,14 +1770,21 @@ namespace OpenRCT2::PathFinding
             }
         }
 
-        // Try A* first for guests with specific destinations (heading to ride or leaving park).
-        // A* is faster and finds better paths for these common cases.
+        // Try A* first for guests with specific destinations.
+        // Use A* for:
+        // 1. Guests with maps heading to rides (they can navigate efficiently)
+        // 2. Guests leaving the park (help them find exits, even without maps)
+        // Guests without maps will use the DFS search below, which feels more "wandering".
         if (auto* guest = peep.As<Guest>(); guest != nullptr)
         {
+            bool hasMap = guest->HasItem(ShopItem::map);
             bool isLeavingPark = (guest->PeepFlags & PEEP_FLAGS_LEAVING_PARK) != 0;
-            bool hasSpecificGoal = !guest->GuestHeadingToRideId.IsNull() || isLeavingPark;
+            bool hasSpecificGoal = !guest->GuestHeadingToRideId.IsNull();
 
-            if (hasSpecificGoal && edges != 0)
+            // Use A* for guests with maps heading to rides, or any guest leaving the park
+            bool useAStar = (hasSpecificGoal && hasMap) || isLeavingPark;
+
+            if (useAStar && edges != 0)
             {
                 uint32_t currentTick = getGameState().currentTicks;
 
