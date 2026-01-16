@@ -141,8 +141,10 @@ namespace OpenRCT2::PathFinding
     private:
         static uint32_t MakeKey(const TileCoordsXYZ& loc)
         {
-            return (static_cast<uint32_t>(loc.x & 0xFF) << 16)
-                | (static_cast<uint32_t>(loc.y & 0xFF) << 8)
+            // Use 10 bits for x and y to support maps up to 1024 tiles
+            // (matches VisitedTileSet key format to avoid collisions on large maps)
+            return (static_cast<uint32_t>(loc.x & 0x3FF) << 18)
+                | (static_cast<uint32_t>(loc.y & 0x3FF) << 8)
                 | static_cast<uint32_t>(loc.z & 0xFF);
         }
 
@@ -1345,9 +1347,10 @@ namespace OpenRCT2::PathFinding
 
     /**
      * Helper function for A* search: Check if tile has valid path for traversal.
+     * Uses FootpathIsZAndDirectionValid to properly handle sloped paths from both directions.
      */
     static bool AStarIsValidPathTile(
-        const TileCoordsXYZ& loc, bool ignoreForeignQueues, RideId queueRideIndex)
+        const TileCoordsXYZ& loc, Direction fromDirection, bool ignoreForeignQueues, RideId queueRideIndex)
     {
         auto* element = MapGetFirstElementAt(loc);
         if (element == nullptr)
@@ -1361,7 +1364,8 @@ namespace OpenRCT2::PathFinding
                 continue;
 
             auto* pathElement = element->AsPath();
-            if (pathElement->BaseHeight != loc.z)
+            // Use proper slope validation - handles both uphill and downhill approaches
+            if (!FootpathIsZAndDirectionValid(*pathElement, loc.z, fromDirection))
                 continue;
 
             // Check queue restrictions
@@ -1463,6 +1467,9 @@ namespace OpenRCT2::PathFinding
         static constexpr uint16_t kCloseGoalIterations = 100;
         uint16_t maxIterations = (initialDistToGoal < kCloseGoalThreshold) ? kCloseGoalIterations : AStarConfig::kMaxIterations;
 
+        // Get the path element at the start position to handle slopes
+        auto* startPathElement = AStarGetPathElementAt(start);
+
         // Initialize with starting edges
         for (Direction dir = 0; dir < kNumOrthogonalDirections; dir++)
         {
@@ -1470,10 +1477,15 @@ namespace OpenRCT2::PathFinding
                 continue;
 
             TileCoordsXYZ next = start;
+            // Handle sloped paths: if walking up a slope, increase Z coordinate
+            if (startPathElement != nullptr && startPathElement->IsSloped() && startPathElement->GetSlopeDirection() == dir)
+            {
+                next.z += 2;
+            }
             next += TileDirectionDelta[dir];
 
             // Validate next tile has valid path element
-            if (!AStarIsValidPathTile(next, ignoreForeignQueues, queueRideIndex))
+            if (!AStarIsValidPathTile(next, dir, ignoreForeignQueues, queueRideIndex))
                 continue;
 
             auto hCost = static_cast<uint16_t>(
@@ -1535,13 +1547,19 @@ namespace OpenRCT2::PathFinding
                     continue;
 
                 TileCoordsXYZ next = current.location;
+                // Handle sloped paths: if walking up a slope, increase Z coordinate
+                // This matches the DFS behavior in PeepPathfindHeuristicSearch
+                if (pathElement->IsSloped() && pathElement->GetSlopeDirection() == dir)
+                {
+                    next.z += 2;
+                }
                 next += TileDirectionDelta[dir];
 
                 uint32_t key = tileKey(next);
                 if (visited.Contains(key))
                     continue;
 
-                if (!AStarIsValidPathTile(next, ignoreForeignQueues, queueRideIndex))
+                if (!AStarIsValidPathTile(next, dir, ignoreForeignQueues, queueRideIndex))
                     continue;
 
                 if (openCount >= AStarConfig::kMaxOpenSetSize)
@@ -1729,16 +1747,26 @@ namespace OpenRCT2::PathFinding
         // If guest has only 2 choices and one is the reverse of their current direction,
         // continue forward without any pathfinding - this eliminates A* calls on ~60-70%
         // of path segments (straight corridors).
-        if (std::popcount(edges) == 2)
+        // IMPORTANT: Only apply to guests, not staff - staff have different pathfinding
+        // behavior (patrolling, going to tasks) that requires proper route calculation.
+        // IMPORTANT: Only apply when far from goal - when close, we need proper pathfinding
+        // to navigate to the exact destination (e.g., stall entrance).
+        if (peep.Is<Guest>())
         {
-            Direction reverseDir = DirectionReverse(peep.PeepDirection);
-            if (edges & (1 << reverseDir))
+            int32_t distanceToGoal = CalculateHeuristicPathingScore(loc, goal);
+            static constexpr int32_t kMinDistanceForForwardOptimization = 150; // ~5 tiles
+
+            if (distanceToGoal >= kMinDistanceForForwardOptimization && std::popcount(edges) == 2)
             {
-                // Only 2 choices: reverse and one other - take the other
-                uint32_t forwardEdge = edges & ~(1u << reverseDir);
-                Direction forwardDir = static_cast<Direction>(Numerics::bitScanForward(forwardEdge));
-                LogPathfinding(&peep, "Continuing forward: direction %d (skipped pathfinding)", forwardDir);
-                return forwardDir;
+                Direction reverseDir = DirectionReverse(peep.PeepDirection);
+                if (edges & (1 << reverseDir))
+                {
+                    // Only 2 choices: reverse and one other - take the other
+                    uint32_t forwardEdge = edges & ~(1u << reverseDir);
+                    Direction forwardDir = static_cast<Direction>(Numerics::bitScanForward(forwardEdge));
+                    LogPathfinding(&peep, "Continuing forward: direction %d (skipped pathfinding)", forwardDir);
+                    return forwardDir;
+                }
             }
         }
 
