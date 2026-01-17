@@ -9,11 +9,17 @@
 
 #include "AStarPathfinding.h"
 
+#include "../Diagnostic.h"
 #include "../entity/Peep.h"
+#include "../ride/Ride.h"
+#include "../ride/RideData.h"
 #include "../world/Footpath.h"
 #include "../world/Map.h"
+#include "../world/tile_element/BannerElement.h"
+#include "../world/tile_element/EntranceElement.h"
 #include "../world/tile_element/PathElement.h"
 #include "../world/tile_element/TileElement.h"
+#include "../world/tile_element/TrackElement.h"
 
 #include <cstdlib>
 #include <queue>
@@ -21,8 +27,39 @@
 
 namespace OpenRCT2::PathFinding
 {
+#pragma region A* Pathfinding Logging
+    // Set to true to enable A* pathfinding logging.
+    static constexpr bool kLogAStarPathfinding = true;
+
+    // Only log for guests with this name (set empty to log all)
+    static constexpr const char* kLogAStarPeepName = "Pete Pathfinder";
+
+    template<typename... TArgs>
+    static void LogAStar(
+        [[maybe_unused]] const Peep* peep, [[maybe_unused]] const char* format, [[maybe_unused]] TArgs&&... args)
+    {
+        if constexpr (kLogAStarPathfinding)
+        {
+            if (peep != nullptr && kLogAStarPeepName[0] != '\0' && peep->GetName() != kLogAStarPeepName)
+                return;
+
+            char buffer[256];
+            snprintf(buffer, sizeof(buffer), format, std::forward<TArgs>(args)...);
+
+            if (peep != nullptr)
+            {
+                LOG_INFO("[A*][%05u:%s] %s", peep->Id.ToUnderlying(), peep->GetName().c_str(), buffer);
+            }
+            else
+            {
+                LOG_INFO("[A*] %s", buffer);
+            }
+        }
+    }
+#pragma endregion
+
     // Maximum number of tiles to explore before giving up
-    static constexpr int32_t kAStarMaxTiles = 5000;
+    static constexpr int32_t kAStarMaxTiles = 500000;
 
     struct AStarNode
     {
@@ -75,10 +112,15 @@ namespace OpenRCT2::PathFinding
         }
     };
 
-    // Manhattan distance heuristic
+    // Heuristic weight > 1.0 trades optimality for speed (weighted A*)
+    // This helps complex mazes by preferring paths that head toward the goal
+    static constexpr float kHeuristicWeight = 1.5f;
+
+    // Manhattan distance heuristic with weight
     static int32_t CalculateHeuristic(const TileCoordsXYZ& from, const TileCoordsXYZ& to)
     {
-        return std::abs(from.x - to.x) + std::abs(from.y - to.y);
+        int32_t manhattan = std::abs(from.x - to.x) + std::abs(from.y - to.y);
+        return static_cast<int32_t>(manhattan * kHeuristicWeight);
     }
 
     // Check if a path element is valid for A* pathfinding from the given direction
@@ -131,12 +173,113 @@ namespace OpenRCT2::PathFinding
         return arrivalZ;
     }
 
+    // Get the banner element on top of a path element (for no-entry signs)
+    static const TileElement* GetBannerOnPath(const TileElement* pathElement)
+    {
+        if (pathElement->IsLastForTile())
+            return nullptr;
+
+        const TileElement* bannerElement = pathElement + 1;
+        do
+        {
+            // Path on top, so no banners
+            if (bannerElement->GetType() == TileElementType::Path)
+                return nullptr;
+            // Found a banner
+            if (bannerElement->GetType() == TileElementType::Banner)
+                return bannerElement;
+            // Last element so there can't be any other banners
+            if (bannerElement->IsLastForTile())
+                return nullptr;
+
+        } while (bannerElement++ != nullptr);
+
+        return nullptr;
+    }
+
+    // Remove edges blocked by no-entry banners
+    static int32_t BannerClearPathEdges(const PathElement* pathElement, int32_t edges)
+    {
+        const TileElement* bannerElement = GetBannerOnPath(reinterpret_cast<const TileElement*>(pathElement));
+        if (bannerElement != nullptr)
+        {
+            do
+            {
+                edges &= bannerElement->AsBanner()->GetAllowedEdges();
+            } while ((bannerElement = GetBannerOnPath(bannerElement)) != nullptr);
+        }
+        return edges;
+    }
+
     // Get the permitted edges of a path element (edges without no-entry signs)
     static uint8_t GetPermittedEdges(const PathElement* pathElement)
     {
-        // For simplicity, we just get the raw edges
-        // In the full implementation, we'd also check for banners
-        return pathElement->GetEdges() & 0x0F;
+        return BannerClearPathEdges(pathElement, pathElement->GetEdgesAndCorners()) & 0x0F;
+    }
+
+    // Check if an entrance can be approached from a given direction
+    static bool IsEntranceApproachableFromDirection(const EntranceElement* entrance, Direction approachDirection)
+    {
+        // The entrance faces a certain direction; we can approach from that direction
+        Direction entranceDirection = entrance->GetDirection();
+        return approachDirection == entranceDirection;
+    }
+
+    // Check if a tile at the goal position is a valid destination (shop, park exit, ride entrance)
+    // This handles non-path goal tiles that A* wouldn't otherwise recognize
+    static bool IsGoalTileReachable(const TileCoordsXYZ& pos, const TileCoordsXYZ& goal, Direction approachDirection)
+    {
+        if (pos.x != goal.x || pos.y != goal.y)
+            return false;
+
+        TileElement* tileElement = MapGetFirstElementAt(goal);
+        if (tileElement == nullptr)
+            return false;
+
+        do
+        {
+            if (tileElement->IsGhost())
+                continue;
+
+            // Check for shop/facility entrance (Track element)
+            if (tileElement->GetType() == TileElementType::Track)
+            {
+                if (tileElement->BaseHeight != goal.z)
+                    continue;
+
+                auto* trackElement = tileElement->AsTrack();
+                auto rideIndex = trackElement->GetRideIndex();
+                auto* ride = GetRide(rideIndex);
+                if (ride != nullptr && ride->getRideTypeDescriptor().HasFlag(RtdFlag::isShopOrFacility))
+                {
+                    return true;
+                }
+            }
+            // Check for park entrance/exit or ride entrance/exit (Entrance element)
+            else if (tileElement->GetType() == TileElementType::Entrance)
+            {
+                if (tileElement->BaseHeight != goal.z)
+                    continue;
+
+                auto* entranceElement = tileElement->AsEntrance();
+                auto entranceType = entranceElement->GetEntranceType();
+
+                if (entranceType == ENTRANCE_TYPE_PARK_ENTRANCE)
+                {
+                    return true;
+                }
+                else if (entranceType == ENTRANCE_TYPE_RIDE_ENTRANCE || entranceType == ENTRANCE_TYPE_RIDE_EXIT)
+                {
+                    // Check if we're approaching from the correct direction
+                    if (IsEntranceApproachableFromDirection(entranceElement, approachDirection))
+                    {
+                        return true;
+                    }
+                }
+            }
+        } while (!(tileElement++)->IsLastForTile());
+
+        return false;
     }
 
     Direction AStarChooseDirection(
@@ -174,6 +317,18 @@ namespace OpenRCT2::PathFinding
         if (startEdges == 0)
             return kInvalidDirection;
 
+        // Exclude the direction the peep came from to prevent oscillation on wide paths
+        // (peep.PeepDirection is the direction the peep is currently facing/moving)
+        if (DirectionValid(peep.PeepDirection))
+        {
+            Direction reverseDir = DirectionReverse(peep.PeepDirection);
+            uint8_t edgesWithoutReverse = startEdges & ~(1 << reverseDir);
+
+            // Only exclude reverse if other edges are available (allow backtracking if stuck)
+            if (edgesWithoutReverse != 0)
+                startEdges = edgesWithoutReverse;
+        }
+
         // Initialize open set (priority queue) and closed set
         std::priority_queue<AStarNode, std::vector<AStarNode>, AStarNodeCompare> openSet;
         std::unordered_map<PositionKey, int32_t, PositionKeyHash> closedSet;
@@ -183,6 +338,8 @@ namespace OpenRCT2::PathFinding
         // firstDirection pointing toward the dead end, then find the goal via
         // a different path but return the wrong firstDirection.
         closedSet[PositionKey(loc)] = 0;
+
+        LogAStar(&peep, "Start (%d,%d,%d) -> Goal (%d,%d,%d)", loc.x, loc.y, loc.z, goal.x, goal.y, goal.z);
 
         int32_t tilesExplored = 0;
 
@@ -197,6 +354,13 @@ namespace OpenRCT2::PathFinding
             neighborPos.x = loc.x + TileDirectionDelta[dir].x;
             neighborPos.y = loc.y + TileDirectionDelta[dir].y;
             neighborPos.z = GetArrivalZ(startPath, dir);
+
+            // Check if this is the goal tile (shop, park exit, ride entrance)
+            if (IsGoalTileReachable(neighborPos, goal, dir))
+            {
+                LogAStar(&peep, "SUCCESS (initial): dir=%d, goal is adjacent", dir);
+                return dir;
+            }
 
             // Check if neighbor is valid and has return edge
             const PathElement* neighborPath = GetValidPathElement(neighborPos, dir, ignoreForeignQueues, queueRideIndex);
@@ -229,6 +393,7 @@ namespace OpenRCT2::PathFinding
             // Check if we reached the goal
             if (current.position == goal)
             {
+                LogAStar(&peep, "SUCCESS: dir=%d, gCost=%d, tiles explored=%d", current.firstDirection, current.gCost, tilesExplored);
                 return current.firstDirection;
             }
 
@@ -242,6 +407,11 @@ namespace OpenRCT2::PathFinding
             closedSet[posKey] = current.gCost;
 
             tilesExplored++;
+            if constexpr (kLogAStarPathfinding)
+            {
+                if (tilesExplored % 5000 == 0)
+                    LogAStar(&peep, "Progress: %d tiles explored, open set: %zu", tilesExplored, openSet.size());
+            }
 
             // Find path element at current position
             const PathElement* currentPath = nullptr;
@@ -280,6 +450,13 @@ namespace OpenRCT2::PathFinding
                 neighborPos.y = current.position.y + TileDirectionDelta[dir].y;
                 neighborPos.z = GetArrivalZ(currentPath, dir);
 
+                // Check if this is the goal tile (shop, park exit, ride entrance)
+                if (IsGoalTileReachable(neighborPos, goal, dir))
+                {
+                    LogAStar(&peep, "SUCCESS: dir=%d, gCost=%d, tiles explored=%d", current.firstDirection, current.gCost + 1, tilesExplored);
+                    return current.firstDirection;
+                }
+
                 // Check if neighbor is valid
                 const PathElement* neighborPath = GetValidPathElement(neighborPos, dir, ignoreForeignQueues, queueRideIndex);
                 if (neighborPath == nullptr)
@@ -313,6 +490,7 @@ namespace OpenRCT2::PathFinding
         }
 
         // Goal not found - return invalid direction to fall back to DFS
+        LogAStar(&peep, "FAILED: tiles explored=%d, open set empty=%s", tilesExplored, openSet.empty() ? "yes" : "no");
         return kInvalidDirection;
     }
 

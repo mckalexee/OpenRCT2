@@ -1246,7 +1246,8 @@ namespace OpenRCT2::PathFinding
                 Direction result = AStarChooseDirection(loc, goal, peep, ignoreForeignQueues, queueRideIndex);
                 if (result != kInvalidDirection)
                     return result;
-                // Fall through to DFS on failure
+                // A* failed, falling back to DFS
+                LogPathfinding(&peep, "A* failed, falling back to DFS");
             }
         }
 
