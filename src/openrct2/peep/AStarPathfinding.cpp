@@ -116,6 +116,15 @@ namespace OpenRCT2::PathFinding
     // This helps complex mazes by preferring paths that head toward the goal
     static constexpr float kHeuristicWeight = 1.5f;
 
+    // Direction orders rotated by guest ID for path variance
+    // Each guest consistently prefers a different direction order, creating visual spread
+    static constexpr Direction kDirectionOrders[4][4] = {
+        { 0, 1, 2, 3 },
+        { 1, 2, 3, 0 },
+        { 2, 3, 0, 1 },
+        { 3, 0, 1, 2 },
+    };
+
     // Manhattan distance heuristic with weight
     static int32_t CalculateHeuristic(const TileCoordsXYZ& from, const TileCoordsXYZ& to)
     {
@@ -343,8 +352,11 @@ namespace OpenRCT2::PathFinding
 
         int32_t tilesExplored = 0;
 
+        // Select direction order based on guest ID for consistent path variance
+        const auto& dirOrder = kDirectionOrders[peep.Id.ToUnderlying() % 4];
+
         // Add initial neighbors to open set
-        for (Direction dir : kAllDirections)
+        for (Direction dir : dirOrder)
         {
             if (!(startEdges & (1 << dir)))
                 continue;
@@ -439,7 +451,7 @@ namespace OpenRCT2::PathFinding
             uint8_t edges = GetPermittedEdges(currentPath);
 
             // Explore neighbors
-            for (Direction dir : kAllDirections)
+            for (Direction dir : dirOrder)
             {
                 if (!(edges & (1 << dir)))
                     continue;
