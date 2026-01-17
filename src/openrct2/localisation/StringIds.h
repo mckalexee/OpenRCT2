@@ -1750,6 +1750,12 @@ enum : StringId
     STR_OBJECT_SELECTION_CLIMATE = 6743,
     STR_CLIMATE_WEATHER_PERCENT = 6744,
 
+    // Object selection: Select All / Deselect All buttons
+    STR_SELECT_ALL = 7017,
+    STR_SELECT_ALL_TIP = 7018,
+    STR_DESELECT_ALL = 7019,
+    STR_DESELECT_ALL_TIP = 7020,
+
     // Gamepad settings
     STR_GAMEPAD_GROUP = 6785,
     STR_GAMEPAD_DEADZONE_LABEL = 6786,

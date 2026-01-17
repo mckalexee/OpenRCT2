@@ -217,6 +217,8 @@ namespace OpenRCT2::Ui::Windows
         WIDX_LIST_SORT_TYPE,
         WIDX_LIST_SORT_RIDE,
         WIDX_RELOAD_OBJECT,
+        WIDX_SELECT_ALL,
+        WIDX_DESELECT_ALL,
         WIDX_TAB_1,
     };
 
@@ -243,6 +245,8 @@ namespace OpenRCT2::Ui::Windows
         makeWidget         ({  4, 80}, {              145,  14}, WidgetType::tableHeader, WindowColour::secondary                                                                  ),
         makeWidget         ({149, 80}, {              143,  14}, WidgetType::tableHeader, WindowColour::secondary                                                                  ),
         makeWidget         ({700, 50}, {               24,  24}, WidgetType::imgBtn,      WindowColour::secondary,  SPR_G2_RELOAD,                STR_RELOAD_OBJECT_TIP            ),
+        makeWidget         ({210, 22}, {               80,  14}, WidgetType::button,      WindowColour::primary,    STR_SELECT_ALL,               STR_SELECT_ALL_TIP               ),
+        makeWidget         ({295, 22}, {               80,  14}, WidgetType::button,      WindowColour::primary,    STR_DESELECT_ALL,             STR_DESELECT_ALL_TIP             ),
         makeTab            ({  3, 17},                                                                                                            STR_STRING_DEFINED_TOOLTIP       )
         // Copied object type times...
     );
@@ -487,6 +491,12 @@ namespace OpenRCT2::Ui::Windows
                             GfxInvalidateScreen();
                         }
                     }
+                    break;
+                case WIDX_SELECT_ALL:
+                    SelectAllVisible(true);
+                    break;
+                case WIDX_DESELECT_ALL:
+                    SelectAllVisible(false);
                     break;
                 default:
                     if (widgetIndex >= WIDX_TAB_1
@@ -884,6 +894,23 @@ namespace OpenRCT2::Ui::Windows
                 installTrackWidget.type = WidgetType::empty;
             }
 
+            // Position Select All/Deselect All buttons side-by-side
+            auto& selectAllWidget = widgets[WIDX_SELECT_ALL];
+            auto& deselectAllWidget = widgets[WIDX_DESELECT_ALL];
+
+            // Position relative to dropdown when Install Track is hidden, otherwise relative to Install Track
+            if (installTrackWidget.type == WidgetType::empty)
+            {
+                // No Install Track button - position directly next to dropdown
+                deselectAllWidget.moveToX(dropdownWidget.left - deselectAllWidget.width() - 6);
+            }
+            else
+            {
+                // Install Track visible - position to its left
+                deselectAllWidget.moveToX(installTrackWidget.left - deselectAllWidget.width() - 6);
+            }
+            selectAllWidget.moveToX(deselectAllWidget.left - selectAllWidget.width() - 6);
+
             // Set title parameters for current page
             const auto& currentPage = ObjectSelectionPages[selectedTab];
             auto ft = Formatter::Common();
@@ -940,6 +967,18 @@ namespace OpenRCT2::Ui::Windows
                 {
                     widgets[WIDX_TAB_1 + i].type = WidgetType::empty;
                 }
+            }
+
+            // Select All/Deselect All buttons - hide in Track Designs Manager mode
+            if (gLegacyScene == LegacyScene::trackDesignsManager)
+            {
+                widgets[WIDX_SELECT_ALL].type = WidgetType::empty;
+                widgets[WIDX_DESELECT_ALL].type = WidgetType::empty;
+            }
+            else
+            {
+                widgets[WIDX_SELECT_ALL].type = WidgetType::button;
+                widgets[WIDX_DESELECT_ALL].type = WidgetType::button;
             }
 
             // Do we have any sub-tabs?
@@ -1180,6 +1219,35 @@ namespace OpenRCT2::Ui::Windows
             }
 
             VisibleListRefresh();
+            invalidate();
+        }
+
+        void SelectAllVisible(bool select)
+        {
+            EditorInputFlags inputFlags = { EditorInputFlag::unk1, EditorInputFlag::selectObjectsInSceneryGroup };
+            if (select)
+                inputFlags.set(EditorInputFlag::select);
+
+            for (auto& listItem : _listItems)
+            {
+                uint8_t objectSelectionFlags = *listItem.flags;
+
+                // Skip if already in desired state
+                bool isSelected = (objectSelectionFlags & ObjectSelectionFlags::Selected) != 0;
+                if (isSelected == select)
+                    continue;
+
+                // Skip disabled items
+                if (objectSelectionFlags & ObjectSelectionFlags::Flag6)
+                    continue;
+
+                WindowEditorObjectSelectionSelectObject(0, inputFlags, listItem.repositoryItem);
+            }
+
+            if (IsFilterActive(FILTER_SELECTED) || IsFilterActive(FILTER_NONSELECTED))
+            {
+                VisibleListRefresh();
+            }
             invalidate();
         }
 
