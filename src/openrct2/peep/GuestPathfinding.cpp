@@ -1962,9 +1962,11 @@ namespace OpenRCT2::PathFinding
             return GuestSurfacePathFinding(peep);
         }
 
-        // Check if this guest will use A* pathfinding (has map or is leaving park).
-        // A* doesn't need the wide path filtering that DFS uses.
-        bool willUseAStar = peep.HasItem(ShopItem::map) || (peep.PeepFlags & PEEP_FLAGS_LEAVING_PARK);
+        // Check if this guest will use A* pathfinding.
+        // A* is only used when guest is heading somewhere (to a ride or park exit) AND has a map or is leaving.
+        // Aimless guests with maps do NOT use A* - they use GuestPathfindAimless.
+        bool willUseAStar = peep.HeadingForRideOrParkExit()
+            && (peep.HasItem(ShopItem::map) || (peep.PeepFlags & PEEP_FLAGS_LEAVING_PARK));
 
         if (!willUseAStar && !peep.OutsideOfPark && peep.HeadingForRideOrParkExit())
         {
