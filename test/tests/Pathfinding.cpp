@@ -251,3 +251,180 @@ INSTANTIATE_TEST_SUITE_P(
         SimplePathfindingScenario("PathWithFences", { 11, 6, 14 }, 10000),
         SimplePathfindingScenario("PathWithCliff", { 7, 17, 14 }, 10000)),
     SimplePathfindingScenario::ToName);
+
+// A* Pathfinding Tests
+// These tests verify the A* pathfinding algorithm works correctly for guests with maps
+
+class AStarPathfindingTestBase : public PathfindingTestBase
+{
+protected:
+    // Find path using A* (guest with map)
+    static bool FindPathWithMap(TileCoordsXYZ* pos, const TileCoordsXYZ& goal, int expectedSteps, RideId targetRideID)
+    {
+        auto* peep = Guest::Generate(pos->ToCoordsXYZ().ToTileCentre());
+        peep->OutsideOfPark = false;
+        peep->GuestHeadingToRideId = targetRideID;
+
+        // Give guest a map to trigger A* pathfinding
+        peep->GiveItem(ShopItem::map);
+
+        const Direction moveDir = PathFinding::ChooseDirection(*pos, goal, *peep, false, RideId::GetNull());
+        if (moveDir == kInvalidDirection)
+        {
+            PeepEntityRemove(peep);
+            return false;
+        }
+
+        peep->PeepDirection = moveDir;
+        auto destination = CoordsDirectionDelta[moveDir] + peep->GetLocation();
+        peep->SetDestination(destination, 2);
+
+        int step = 0;
+        while (!(*pos == goal) && step < expectedSteps)
+        {
+            peep->PerformNextAction();
+            ++step;
+
+            *pos = TileCoordsXYZ(peep->GetLocation());
+
+            EXPECT_PRED_FORMAT1(AssertIsNotForbiddenPosition, *pos);
+            EXPECT_NE(MapGetFootpathElement({ pos->ToCoordsXY(), peep->NextLoc.z }), nullptr);
+        }
+
+        PeepEntityRemove(peep);
+        EXPECT_EQ(step, expectedSteps);
+
+        return *pos == goal;
+    }
+
+    // Find path for guest leaving park (also uses A*)
+    static bool FindPathLeavingPark(TileCoordsXYZ* pos, const TileCoordsXYZ& goal, int expectedSteps, RideId targetRideID)
+    {
+        auto* peep = Guest::Generate(pos->ToCoordsXYZ().ToTileCentre());
+        peep->OutsideOfPark = false;
+        peep->GuestHeadingToRideId = targetRideID;
+
+        // Set leaving park flag to trigger A* pathfinding
+        peep->PeepFlags |= PEEP_FLAGS_LEAVING_PARK;
+
+        const Direction moveDir = PathFinding::ChooseDirection(*pos, goal, *peep, false, RideId::GetNull());
+        if (moveDir == kInvalidDirection)
+        {
+            PeepEntityRemove(peep);
+            return false;
+        }
+
+        peep->PeepDirection = moveDir;
+        auto destination = CoordsDirectionDelta[moveDir] + peep->GetLocation();
+        peep->SetDestination(destination, 2);
+
+        int step = 0;
+        while (!(*pos == goal) && step < expectedSteps)
+        {
+            peep->PerformNextAction();
+            ++step;
+
+            *pos = TileCoordsXYZ(peep->GetLocation());
+
+            EXPECT_PRED_FORMAT1(AssertIsNotForbiddenPosition, *pos);
+            EXPECT_NE(MapGetFootpathElement({ pos->ToCoordsXY(), peep->NextLoc.z }), nullptr);
+        }
+
+        PeepEntityRemove(peep);
+        EXPECT_EQ(step, expectedSteps);
+
+        return *pos == goal;
+    }
+};
+
+class AStarPathfindingTest : public AStarPathfindingTestBase, public ::testing::WithParamInterface<SimplePathfindingScenario>
+{
+};
+
+TEST_P(AStarPathfindingTest, GuestWithMapCanFindPath)
+{
+    const SimplePathfindingScenario& scenario = GetParam();
+
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, scenario.start);
+    TileCoordsXYZ pos = scenario.start;
+
+    auto ride = FindRideByName(scenario.name);
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    const auto succeeded = FindPathWithMap(&pos, goal, scenario.steps, ride->id) ? ::testing::AssertionSuccess()
+                                                                                  : ::testing::AssertionFailure()
+            << "A* failed to find path from " << scenario.start << " to " << goal << " in " << scenario.steps
+            << " steps; reached " << pos << " before giving up.";
+
+    EXPECT_TRUE(succeeded);
+}
+
+// Test A* with same scenarios as DFS to ensure it produces valid paths
+INSTANTIATE_TEST_SUITE_P(
+    ForScenario, AStarPathfindingTest,
+    ::testing::Values(
+        SimplePathfindingScenario("StraightFlat", { 19, 15, 14 }, 24), SimplePathfindingScenario("SBend", { 15, 12, 14 }, 87),
+        SimplePathfindingScenario("UBend", { 17, 9, 14 }, 87), SimplePathfindingScenario("StraightUpBridge", { 12, 15, 14 }, 24),
+        SimplePathfindingScenario("StraightUpSlope", { 14, 15, 14 }, 24)),
+    SimplePathfindingScenario::ToName);
+
+class AStarImpossiblePathfindingTest : public AStarPathfindingTestBase,
+                                       public ::testing::WithParamInterface<SimplePathfindingScenario>
+{
+};
+
+TEST_P(AStarImpossiblePathfindingTest, GuestWithMapCannotFindUnreachablePath)
+{
+    const SimplePathfindingScenario& scenario = GetParam();
+    TileCoordsXYZ pos = scenario.start;
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, scenario.start);
+
+    auto ride = FindRideByName(scenario.name);
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x + TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y + TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    // A* should fail and fall back to DFS, which should also fail
+    EXPECT_FALSE(FindPathWithMap(&pos, goal, 10000, ride->id));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ForScenario, AStarImpossiblePathfindingTest,
+    ::testing::Values(
+        SimplePathfindingScenario("PathWithGap", { 1, 6, 14 }, 10000),
+        SimplePathfindingScenario("PathWithFences", { 11, 6, 14 }, 10000),
+        SimplePathfindingScenario("PathWithCliff", { 7, 17, 14 }, 10000)),
+    SimplePathfindingScenario::ToName);
+
+// Test that leaving park flag also triggers A* pathfinding
+class AStarLeavingParkTest : public AStarPathfindingTestBase
+{
+};
+
+TEST_F(AStarLeavingParkTest, LeavingParkGuestUsesAStar)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 }; // StraightFlat start position
+    ASSERT_PRED_FORMAT1(AssertIsStartPosition, pos);
+
+    auto ride = FindRideByName("StraightFlat");
+    ASSERT_NE(ride, nullptr);
+
+    auto entrancePos = ride->getStation().Entrance;
+    TileCoordsXYZ goal = TileCoordsXYZ(
+        entrancePos.x - TileDirectionDelta[entrancePos.direction].x,
+        entrancePos.y - TileDirectionDelta[entrancePos.direction].y, entrancePos.z);
+
+    const auto succeeded = FindPathLeavingPark(&pos, goal, 24, ride->id) ? ::testing::AssertionSuccess()
+                                                                          : ::testing::AssertionFailure()
+            << "A* (leaving park) failed to find path to goal.";
+
+    EXPECT_TRUE(succeeded);
+}

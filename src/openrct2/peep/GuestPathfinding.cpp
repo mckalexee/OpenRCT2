@@ -9,6 +9,8 @@
 
 #include "GuestPathfinding.h"
 
+#include "AStarPathfinding.h"
+
 #include "../Diagnostic.h"
 #include "../GameState.h"
 #include "../core/Guard.hpp"
@@ -1235,6 +1237,18 @@ namespace OpenRCT2::PathFinding
         const TileCoordsXYZ& loc, const TileCoordsXYZ& goal, Peep& peep, bool ignoreForeignQueues, RideId queueRideIndex)
     {
         PROFILED_FUNCTION();
+
+        // Use A* for guests with maps or leaving the park
+        if (auto* guest = peep.As<Guest>(); guest != nullptr)
+        {
+            if (guest->HasItem(ShopItem::map) || (guest->PeepFlags & PEEP_FLAGS_LEAVING_PARK))
+            {
+                Direction result = AStarChooseDirection(loc, goal, peep, ignoreForeignQueues, queueRideIndex);
+                if (result != kInvalidDirection)
+                    return result;
+                // Fall through to DFS on failure
+            }
+        }
 
         PathFindingState state{};
 

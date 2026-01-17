@@ -409,6 +409,7 @@
     <ClInclude Include="park\ParkFile.h" />
     <ClInclude Include="park\ParkPreview.h" />
     <ClInclude Include="peep\Guest.h" />
+    <ClInclude Include="peep\AStarPathfinding.h" />
     <ClInclude Include="peep\GuestPathfinding.h" />
     <ClInclude Include="peep\PeepAnimations.h" />
     <ClInclude Include="peep\PeepSpriteIds.h" />
@@ -1058,6 +1059,7 @@
     <ClCompile Include="park\Legacy.cpp" />
     <ClCompile Include="park\ParkFile.cpp" />
     <ClCompile Include="park\ParkPreview.cpp" />
+    <ClCompile Include="peep\AStarPathfinding.cpp" />
     <ClCompile Include="peep\GuestPathfinding.cpp" />
     <ClCompile Include="peep\PeepAnimations.cpp" />
     <ClCompile Include="peep\PeepThoughts.cpp" />
