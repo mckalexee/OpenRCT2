@@ -1922,7 +1922,11 @@ namespace OpenRCT2::PathFinding
             return GuestSurfacePathFinding(peep);
         }
 
-        if (!peep.OutsideOfPark && peep.HeadingForRideOrParkExit())
+        // Check if this guest will use A* pathfinding (has map or is leaving park).
+        // A* doesn't need the wide path filtering that DFS uses.
+        bool willUseAStar = peep.HasItem(ShopItem::map) || (peep.PeepFlags & PEEP_FLAGS_LEAVING_PARK);
+
+        if (!willUseAStar && !peep.OutsideOfPark && peep.HeadingForRideOrParkExit())
         {
             /* If this tileElement is adjacent to any non-wide paths,
              * remove all of the edges to wide paths. */
@@ -2009,8 +2013,12 @@ namespace OpenRCT2::PathFinding
                 {
                     case PathSearchResult::DeadEnd:
                     case PathSearchResult::RideExit:
-                    case PathSearchResult::Wide:
                         adjustedEdges &= ~(1 << chosenDirection);
+                        break;
+                    case PathSearchResult::Wide:
+                        // Only filter wide paths for non-A* users; A* can find optimal paths across wide areas
+                        if (!willUseAStar)
+                            adjustedEdges &= ~(1 << chosenDirection);
                         break;
                     default:
                         break;
