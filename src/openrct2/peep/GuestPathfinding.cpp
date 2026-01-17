@@ -198,6 +198,46 @@ namespace OpenRCT2::PathFinding
     }
 
     /**
+     * Checks if the given location is in a wide path area by looking for any 2x2 square
+     * of connected path tiles (at the same height) that includes the current tile.
+     * This distinguishes wide plazas from regular junctions.
+     */
+    static bool IsInWidePathArea(const TileCoordsXYZ& loc, int32_t baseZ)
+    {
+        // Check 4 possible 2x2 squares that include the current tile.
+        // For each square, check if all 4 tiles are paths at the same height.
+        // Offsets for the other 3 tiles in each 2x2 square (relative to current tile):
+        //   NW square: (-1,-1), (0,-1), (-1,0)
+        //   NE square: (0,-1), (1,-1), (1,0)  - note: using (1,-1) not (0,-1) twice
+        //   SW square: (-1,0), (-1,1), (0,1)
+        //   SE square: (1,0), (0,1), (1,1)
+        static constexpr TileCoordsXY kSquareOffsets[4][3] = {
+            {{-1, -1}, {0, -1}, {-1, 0}},  // NW
+            {{0, -1}, {1, -1}, {1, 0}},    // NE
+            {{-1, 0}, {-1, 1}, {0, 1}},    // SW
+            {{1, 0}, {0, 1}, {1, 1}}       // SE
+        };
+
+        for (const auto& square : kSquareOffsets)
+        {
+            bool allPaths = true;
+            for (const auto& offset : square)
+            {
+                TileCoordsXYZ checkLoc = {loc.x + offset.x, loc.y + offset.y, loc.z};
+                auto* pathElement = MapGetPathElementAt(checkLoc);
+                if (pathElement == nullptr || pathElement->GetBaseZ() != baseZ)
+                {
+                    allPaths = false;
+                    break;
+                }
+            }
+            if (allPaths)
+                return true;
+        }
+        return false;
+    }
+
+    /**
      *
      *  rct2: 0x0069524E
      */
@@ -2030,8 +2070,10 @@ namespace OpenRCT2::PathFinding
 
         /* If there are still multiple directions to choose from,
          * peeps with maps will randomly read the map: probability of doing so
-         * is much higher when heading for a ride or the park exit. */
-        if (peep.HasItem(ShopItem::map))
+         * is much higher when heading for a ride or the park exit.
+         * Skip map reading on wide paths (2x2+ connected areas) where every tile
+         * is a junction, causing constant map checking. */
+        if (peep.HasItem(ShopItem::map) && !IsInWidePathArea(loc, pathElement->GetBaseZ()))
         {
             // If at least 2 directions consult map
             if (std::popcount(edges) >= 2)
