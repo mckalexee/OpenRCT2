@@ -199,7 +199,7 @@ namespace OpenRCT2::Ui::Windows
         std::array{ ScreenSize{ 210, 148 }, ScreenSize{ 210, 148 } }, // WINDOW_GUEST_FINANCE
         std::array{ ScreenSize{ 192, 159 }, ScreenSize{ 500, 450 } }, // WINDOW_GUEST_THOUGHTS
         std::array{ ScreenSize{ 192, 159 }, ScreenSize{ 500, 450 } }, // WINDOW_GUEST_INVENTORY
-        std::array{ ScreenSize{ 192, 171 }, ScreenSize{ 192, 171 } }, // WINDOW_GUEST_DEBUG
+        std::array{ ScreenSize{ 192, 220 }, ScreenSize{ 192, 220 } }, // WINDOW_GUEST_DEBUG
     };
     static_assert(_guestWindowPageSizes.size() == WINDOW_GUEST_PAGE_COUNT);
 
@@ -1926,18 +1926,9 @@ namespace OpenRCT2::Ui::Windows
                 {
                     auto ft = Formatter();
                     if (guest->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT)
-                    {
                         ft.Add<StringId>(STR_PEEP_DEBUG_TRANSPORT_ACTIVE);
-                        auto ride = GetRide(guest->GuestHeadingToRideId);
-                        if (ride != nullptr)
-                            ride->formatNameTo(ft);
-                        else
-                            ft.Add<StringId>(kStringIdNone);
-                    }
                     else
-                    {
                         ft.Add<StringId>(STR_PEEP_DEBUG_TRANSPORT_NONE);
-                    }
                     DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_TRANSPORT_SHORTCUT, ft);
                 }
 
