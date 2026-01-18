@@ -41,4 +41,7 @@ namespace OpenRCT2::PathFinding
     std::pair<RideId, StationIndex> ShouldUseTransportRide(
         const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos);
 
+    // Invalidate cached list of transport rides (call when rides are added/removed)
+    void InvalidateTransportRideCache();
+
 } // namespace OpenRCT2::PathFinding

@@ -31,6 +31,7 @@
 #include "../entity/EntityRegistry.h"
 #include "../entity/Peep.h"
 #include "../entity/Staff.h"
+#include "../peep/GuestPathfinding.h"
 #include "../interface/Viewport.h"
 #include "../interface/WindowBase.h"
 #include "../localisation/Formatter.h"
@@ -225,6 +226,9 @@ void RideDelete(RideId id)
     {
         gameState.ridesEndOfUsedRange--;
     }
+
+    // Invalidate transport ride cache in case a transport ride was deleted
+    PathFinding::InvalidateTransportRideCache();
 }
 
 Ride* GetRide(RideId index)
@@ -963,6 +967,9 @@ void RideInitAll()
     auto& gameState = getGameState();
     std::for_each(std::begin(gameState.rides), std::end(gameState.rides), RideReset);
     gameState.ridesEndOfUsedRange = 0;
+
+    // Invalidate transport ride cache so it gets rebuilt on next access
+    PathFinding::InvalidateTransportRideCache();
 }
 
 /**

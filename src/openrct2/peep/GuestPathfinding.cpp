@@ -115,6 +115,34 @@ namespace OpenRCT2::PathFinding
             }
         }
     }
+#pragma endregion
+
+#pragma region Transport Ride Cache
+    // Cache of transport ride IDs to avoid iterating all rides every pathfinding tick
+    static std::vector<RideId> sTransportRideCache;
+    static bool sTransportRideCacheDirty = true;
+
+    void InvalidateTransportRideCache()
+    {
+        sTransportRideCacheDirty = true;
+    }
+
+    static const std::vector<RideId>& GetTransportRides()
+    {
+        if (sTransportRideCacheDirty)
+        {
+            sTransportRideCache.clear();
+            auto& gameState = getGameState();
+            for (const auto& ride : RideManager(gameState))
+            {
+                if (ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide))
+                    sTransportRideCache.push_back(ride.id);
+            }
+            sTransportRideCacheDirty = false;
+        }
+        return sTransportRideCache;
+    }
+#pragma endregion
 
     static constexpr const char* PathSearchToString(PathSearchResult pathFindSearchResult)
     {
@@ -2162,14 +2190,14 @@ namespace OpenRCT2::PathFinding
         StationIndex bestStationIndex = StationIndex::GetNull();
         int32_t bestTotalCost = std::numeric_limits<int32_t>::max(); // Find lowest cost transport option
 
-        auto& gameState = getGameState();
-        int rideCount = 0;
-        for (auto& ride : RideManager(gameState))
+        // Use cached transport ride list instead of iterating all rides
+        for (const auto& rideId : GetTransportRides())
         {
-            rideCount++;
-            bool isTransport = ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide);
-            if (!isTransport)
-                continue;
+            auto* ridePtr = GetRide(rideId);
+            if (ridePtr == nullptr)
+                continue;  // Ride was deleted between cache rebuild and now (rare)
+
+            const auto& ride = *ridePtr;
 
             LogPathfinding(&guest, "Checking transport ride: %s (id=%d, status=%d, numStations=%d, mode=%d)",
                 ride.getName().c_str(), ride.id.ToUnderlying(), static_cast<int>(ride.status), ride.numStations,

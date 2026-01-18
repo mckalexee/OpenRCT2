@@ -19,6 +19,7 @@
 #include "../localisation/StringIds.h"
 #include "../object/ObjectLimits.h"
 #include "../object/ObjectManager.h"
+#include "../peep/GuestPathfinding.h"
 #include "../ride/Ride.h"
 #include "../ride/RideData.h"
 #include "../ride/ShopItem.h"
@@ -301,6 +302,12 @@ namespace OpenRCT2::GameActions
 
         auto* windowMgr = Ui::GetWindowManager();
         windowMgr->InvalidateByClass(WindowClass::rideList);
+
+        // Invalidate transport ride cache if this is a transport ride
+        if (rtd.HasFlag(RtdFlag::isTransportRide))
+        {
+            PathFinding::InvalidateTransportRideCache();
+        }
 
         res.expenditure = ExpenditureType::rideConstruction;
         res.setData(RideId{ rideIndex });
