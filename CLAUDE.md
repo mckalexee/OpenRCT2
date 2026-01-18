@@ -12,9 +12,11 @@ OpenRCT2 is an open-source re-implementation of RollerCoaster Tycoon 2 in C++20.
 
 Uses the Visual Studio solution file. Dependencies are downloaded automatically on first build.
 
+**IMPORTANT:** Use PowerShell (not cmd.exe) for build commands. MSBuild is in the PATH in PowerShell.
+
 **Build:**
-```powershell
-msbuild openrct2.sln /p:Configuration=Release /p:Platform=x64 /m
+```
+powershell.exe -Command "msbuild openrct2.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal"
 ```
 
 **Build configurations:** `Debug`, `Release`, `ReleaseLTCG`
@@ -22,9 +24,9 @@ msbuild openrct2.sln /p:Configuration=Release /p:Platform=x64 /m
 
 **Output:** `bin\openrct2.exe`, `bin\tests.exe`
 
-**Run tests:**
-```powershell
-.\bin\tests.exe --gtest_output=xml:test-results.xml
+**Run tests (from bin directory):**
+```
+powershell.exe -Command "cd 'N:\src\OpenRCT2\bin'; .\tests.exe --gtest_filter=*TestName*"
 ```
 
 ### Linux/macOS (CMake)
