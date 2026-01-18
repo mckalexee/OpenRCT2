@@ -1793,6 +1793,28 @@ void Guest::OnEnterRide(Ride& ride)
  */
 void Guest::OnExitRide(Ride& ride)
 {
+    // Handle transport ride exit - restore original destination
+    if (ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide) && (PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT))
+    {
+        PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT; // Clear flag
+        GuestHeadingToRideId = GuestTransportDestination;
+        GuestTransportDestination = RideId::GetNull();
+        GuestIsLostCountdown = 200;
+        ResetPathfindGoal();
+
+        // Clear any rejection since transport worked successfully this time
+        GuestRejectedTransport = RideId::GetNull();
+        GuestRejectedTransportGoal = RideId::GetNull();
+
+        // Still apply happiness/nausea effects
+        Happiness = HappinessTarget;
+        Nausea = NauseaTarget;
+        WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_STATS;
+
+        // Don't run normal exit logic (go-on-again, favorites, etc.)
+        return;
+    }
+
     if (PeepFlags & PEEP_FLAGS_RIDE_SHOULD_BE_MARKED_AS_FAVOURITE)
     {
         PeepFlags &= ~PEEP_FLAGS_RIDE_SHOULD_BE_MARKED_AS_FAVOURITE;
@@ -2037,9 +2059,13 @@ bool Guest::ShouldGoOnRide(Ride& ride, StationIndex entranceNum, bool atQueue, b
 
         // Assuming the queue conditions are met, peeps will always go on free transport rides.
         // Ride ratings, recent crashes and weather will all be ignored.
+        // Also skip all these checks for guests using transport shortcuts - they need to reach their destination.
         auto ridePrice = RideGetPrice(ride);
-        if (!ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide) || ride.value == kRideValueUndefined
-            || ridePrice != 0)
+        bool skipRideChecks = (ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide)
+                               && ride.value != kRideValueUndefined && ridePrice == 0)
+            || ((PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT) != 0);
+
+        if (!skipRideChecks)
         {
             if (PreviousRide == ride.id)
             {
@@ -2091,7 +2117,9 @@ bool Guest::ShouldGoOnRide(Ride& ride, StationIndex entranceNum, bool atQueue, b
                 // excitement check and will only do a basic intensity check when they arrive at the ride itself.
                 if (ride.id == GuestHeadingToRideId)
                 {
-                    if (ride.ratings.intensity > RideRating::make(10, 00) && !gameState.cheats.ignoreRideIntensity)
+                    // Skip intensity check for transport shortcuts
+                    if (ride.ratings.intensity > RideRating::make(10, 00) && !gameState.cheats.ignoreRideIntensity
+                        && !(PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT))
                     {
                         GuestRideIsTooIntense(*this, ride, peepAtRide);
                         return false;
@@ -2118,7 +2146,9 @@ bool Guest::ShouldGoOnRide(Ride& ride, StationIndex entranceNum, bool atQueue, b
                     // ride intensity check and get me on a sheltered ride!
                     if (!isPrecipitating || !GuestShouldRideWhileRaining(*this, ride))
                     {
-                        if (!gameState.cheats.ignoreRideIntensity)
+                        // Skip intensity/nausea checks for guests using transport shortcuts - they're using
+                        // the ride for transportation, not thrills, so intensity shouldn't deter them.
+                        if (!gameState.cheats.ignoreRideIntensity && !(PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT))
                         {
                             // Intensity calculations. Even though the max intensity can go up to 15, it's capped
                             // at 10.0 (before happiness calculations). A full happiness bar will increase the max
@@ -2176,7 +2206,9 @@ bool Guest::ShouldGoOnRide(Ride& ride, StationIndex entranceNum, bool atQueue, b
 
             // If the ride has not yet been rated and is capable of having g-forces,
             // there's a 90% chance that the peep will ignore it.
-            if (!RideHasRatings(ride) && ride.getRideTypeDescriptor().HasFlag(RtdFlag::checkGForces))
+            // Skip this check for transport shortcuts - they need to reach their destination.
+            if (!RideHasRatings(ride) && ride.getRideTypeDescriptor().HasFlag(RtdFlag::checkGForces)
+                && !(PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT))
             {
                 if ((ScenarioRand() & 0xFFFF) > 0x1999u)
                 {
@@ -2184,7 +2216,8 @@ bool Guest::ShouldGoOnRide(Ride& ride, StationIndex entranceNum, bool atQueue, b
                     return false;
                 }
 
-                if (!gameState.cheats.ignoreRideIntensity)
+                // Skip g-force checks for transport shortcuts - they need to reach their destination
+                if (!gameState.cheats.ignoreRideIntensity && !(PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT))
                 {
                     if (ride.maxPositiveVerticalG > MakeFixed16_2dp(5, 00)
                         || ride.maxNegativeVerticalG < MakeFixed16_2dp(-4, 00) || ride.maxLateralG > MakeFixed16_2dp(4, 00))
@@ -2422,6 +2455,25 @@ void Guest::ChoseNotToGoOnRide(const Ride& ride, bool peepAtRide, bool updateLas
 
     if (ride.id == GuestHeadingToRideId)
     {
+        // Special handling for transport rides when using as shortcut
+        // If guest balks at transport entrance, record rejection to prevent balk loop
+        if (ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide) && (PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT))
+        {
+            // Record the rejection so we don't try this transport again for this goal
+            GuestRejectedTransport = ride.id;
+            GuestRejectedTransportGoal = GuestTransportDestination;
+
+            // Clear shortcut and restore original goal
+            PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
+            GuestHeadingToRideId = GuestTransportDestination;
+            GuestTransportDestination = RideId::GetNull();
+            GuestIsLostCountdown = 200;
+            ResetPathfindGoal();
+            WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
+            // Don't call GuestResetRideHeading - we've already restored the destination
+            return;
+        }
+
         GuestResetRideHeading(*this);
     }
 }
@@ -2455,12 +2507,31 @@ static void GuestTriedToEnterFullQueue(Guest& guest, Ride& ride)
     // Change status "Heading to" to "Walking" if queue is full
     if (ride.id == guest.GuestHeadingToRideId)
     {
-        GuestResetRideHeading(guest);
+        // For transport shortcuts, restore original destination instead of becoming aimless
+        if (guest.PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT)
+        {
+            guest.GuestRejectedTransport = ride.id;
+            guest.GuestRejectedTransportGoal = guest.GuestTransportDestination;
+            guest.PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
+            guest.GuestHeadingToRideId = guest.GuestTransportDestination;
+            guest.GuestTransportDestination = RideId::GetNull();
+            guest.GuestIsLostCountdown = 200;
+            guest.ResetPathfindGoal();
+            guest.WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
+        }
+        else
+        {
+            GuestResetRideHeading(guest);
+        }
     }
 }
 
 static void GuestResetRideHeading(Guest& guest)
 {
+    // Note: Transport shortcut is NOT cleared here - it should only be cleared when:
+    // 1. Guest exits the transport ride (normal completion)
+    // 2. Guest balks at transport entrance (with rejection tracking)
+    // Clearing here would cause re-evaluation loops.
     guest.GuestHeadingToRideId = RideId::GetNull();
     guest.WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
 }
@@ -3146,6 +3217,7 @@ static void GuestDecideWhetherToLeavePark(Guest& guest)
  */
 static void GuestLeavePark(Guest& guest)
 {
+    // Note: Transport shortcut is NOT cleared here - guest may be using transport to leave
     guest.GuestHeadingToRideId = RideId::GetNull();
     if (guest.PeepFlags & PEEP_FLAGS_LEAVING_PARK)
     {
@@ -3183,6 +3255,12 @@ static void PeepHeadForNearestRide(Guest& guest, bool considerOnlyCloseRides, T 
         return;
     if (!guest.GuestHeadingToRideId.IsNull())
     {
+        // If guest has transport shortcut, don't change destination - they need to reach transport first
+        if (guest.PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT)
+        {
+            return;
+        }
+
         auto ride = GetRide(guest.GuestHeadingToRideId);
         if (ride != nullptr && predicate(*ride))
         {
@@ -3271,6 +3349,8 @@ static void PeepHeadForNearestRide(Guest& guest, bool considerOnlyCloseRides, T 
     }
     if (closestRide != nullptr)
     {
+        // Note: Transport shortcut is NOT cleared here - guest may need transport to reach the ride
+        // The transport will continue helping guest reach their new destination
         // Head to that ride
         guest.GuestHeadingToRideId = closestRide->id;
         guest.GuestIsLostCountdown = 200;
@@ -7360,6 +7440,9 @@ Guest* Guest::Generate(const CoordsXYZ& coords)
     peep->ResetPathfindGoal();
     peep->RemoveAllItems();
     peep->GuestHeadingToRideId = RideId::GetNull();
+    peep->GuestTransportDestination = RideId::GetNull();
+    peep->GuestRejectedTransport = RideId::GetNull();
+    peep->GuestRejectedTransportGoal = RideId::GetNull();
     peep->GuestNextInQueue = EntityId::GetNull();
     peep->LitterCount = 0;
     peep->DisgustingCount = 0;
@@ -7799,6 +7882,9 @@ void Guest::Serialise(DataSerialiser& stream)
     stream << GuestNextInQueue;
     stream << ParkEntryTime;
     stream << GuestHeadingToRideId;
+    stream << GuestTransportDestination;
+    stream << GuestRejectedTransport;
+    stream << GuestRejectedTransportGoal;
     stream << GuestIsLostCountdown;
     stream << GuestTimeOnRide;
     stream << PaidToEnter;

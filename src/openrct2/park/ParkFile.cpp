@@ -2331,6 +2331,15 @@ namespace OpenRCT2
         cs.readWrite(guest.GuestNextInQueue);
         cs.readWrite(guest.ParkEntryTime);
         cs.readWrite(guest.GuestHeadingToRideId);
+        // Transport-related fields are not serialized - they're transient runtime state
+        // Clear the fields and flag to ensure consistent state on load
+        if (cs.getMode() == OrcaStream::Mode::reading)
+        {
+            guest.GuestTransportDestination = RideId::GetNull();
+            guest.GuestRejectedTransport = RideId::GetNull();
+            guest.GuestRejectedTransportGoal = RideId::GetNull();
+            guest.PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
+        }
         cs.readWrite(guest.GuestIsLostCountdown);
         cs.readWrite(guest.GuestTimeOnRide);
 

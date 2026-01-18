@@ -265,6 +265,9 @@ public:
     EntityId GuestNextInQueue;
     int32_t ParkEntryTime;
     RideId GuestHeadingToRideId;
+    RideId GuestTransportDestination;     // Original destination when using transport as shortcut
+    RideId GuestRejectedTransport;        // Transport ride we balked at
+    RideId GuestRejectedTransportGoal;    // The goal we were trying to reach when we rejected it
     uint8_t GuestIsLostCountdown;
     uint8_t GuestTimeOnRide;
     money64 PaidToEnter;

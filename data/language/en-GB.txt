@@ -3850,3 +3850,12 @@ STR_7017    :Select All
 STR_7018    :Select all visible objects in this category
 STR_7019    :Deselect All
 STR_7020    :Deselect all visible objects in this category
+STR_7021    :{WINDOW_COLOUR_2}Heading to Ride: {BLACK}{STRINGID}
+STR_7022    :{WINDOW_COLOUR_2}Has Map: {BLACK}{STRINGID}
+STR_7023    :{WINDOW_COLOUR_2}Transport Shortcut: {BLACK}{STRINGID}
+STR_7024    :{WINDOW_COLOUR_2}Original Goal: {BLACK}{STRINGID}
+STR_7025    :Yes (using A*)
+STR_7026    :Yes
+STR_7027    :No
+STR_7028    :Active ({STRINGID})
+STR_7029    :None

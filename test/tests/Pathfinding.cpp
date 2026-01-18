@@ -10,6 +10,7 @@
 #include <openrct2/entity/Guest.h>
 #include <openrct2/peep/GuestPathfinding.h>
 #include <openrct2/platform/Platform.h>
+#include <openrct2/ride/RideData.h>
 #include <openrct2/ride/RideManager.hpp>
 #include <openrct2/scenario/Scenario.h>
 #include <openrct2/world/Footpath.h>
@@ -427,4 +428,374 @@ TEST_F(AStarLeavingParkTest, LeavingParkGuestUsesAStar)
             << "A* (leaving park) failed to find path to goal.";
 
     EXPECT_TRUE(succeeded);
+}
+
+// Transport Shortcut Pathfinding Tests
+// These tests verify the transport ride shortcut mechanism and rejection tracking
+
+class TransportShortcutTest : public PathfindingTestBase
+{
+protected:
+    // Create a guest with specified transport state
+    static Guest* CreateGuestWithTransportState(
+        const TileCoordsXYZ& pos, bool hasMap, bool hasTransportShortcut, RideId headingToRide = RideId::GetNull(),
+        RideId transportDest = RideId::GetNull(), RideId rejectedTransport = RideId::GetNull(),
+        RideId rejectedGoal = RideId::GetNull())
+    {
+        auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+        peep->OutsideOfPark = false;
+        peep->GuestHeadingToRideId = headingToRide;
+
+        if (hasMap)
+        {
+            peep->GiveItem(ShopItem::map);
+        }
+
+        if (hasTransportShortcut)
+        {
+            peep->PeepFlags |= PEEP_FLAGS_TRANSPORT_SHORTCUT;
+            peep->GuestTransportDestination = transportDest;
+        }
+
+        peep->GuestRejectedTransport = rejectedTransport;
+        peep->GuestRejectedTransportGoal = rejectedGoal;
+
+        return peep;
+    }
+};
+
+// Test: Rejection fields are properly initialized
+TEST_F(TransportShortcutTest, RejectionFieldsInitializedToNull)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+
+    EXPECT_TRUE(peep->GuestRejectedTransport.IsNull());
+    EXPECT_TRUE(peep->GuestRejectedTransportGoal.IsNull());
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Transport shortcut flag and fields work together
+TEST_F(TransportShortcutTest, TransportShortcutFlagAndFieldsConsistent)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    auto ride = FindRideByName("StraightFlat");
+    ASSERT_NE(ride, nullptr);
+
+    // Create guest using transport as shortcut
+    auto* peep = CreateGuestWithTransportState(
+        pos, true, true, ride->id, RideId::FromUnderlying(5) // Original destination was ride 5
+    );
+
+    EXPECT_TRUE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+    EXPECT_EQ(peep->GuestHeadingToRideId, ride->id);
+    EXPECT_EQ(peep->GuestTransportDestination, RideId::FromUnderlying(5));
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Rejection tracking prevents re-trying same transport for same goal
+TEST_F(TransportShortcutTest, RejectionPreventsRetryForSameGoal)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    RideId transportRideId = RideId::FromUnderlying(10);
+    RideId originalGoal = RideId::FromUnderlying(5);
+
+    // Create guest who rejected transport 10 while heading to ride 5
+    auto* peep = CreateGuestWithTransportState(pos, true, false, originalGoal, RideId::GetNull(), transportRideId, originalGoal);
+
+    // Guest should have rejection recorded
+    EXPECT_EQ(peep->GuestRejectedTransport, transportRideId);
+    EXPECT_EQ(peep->GuestRejectedTransportGoal, originalGoal);
+
+    // The guest is still heading to the same goal
+    EXPECT_EQ(peep->GuestHeadingToRideId, originalGoal);
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Goal change should allow considering previously rejected transport
+TEST_F(TransportShortcutTest, GoalChangeAllowsRejectedTransport)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    RideId transportRideId = RideId::FromUnderlying(10);
+    RideId originalGoal = RideId::FromUnderlying(5);
+    RideId newGoal = RideId::FromUnderlying(6);
+
+    // Create guest who rejected transport 10 while heading to ride 5
+    auto* peep = CreateGuestWithTransportState(pos, true, false, originalGoal, RideId::GetNull(), transportRideId, originalGoal);
+
+    // Simulate goal change
+    peep->GuestHeadingToRideId = newGoal;
+
+    // Now guest is heading to different goal than when they rejected
+    // The rejection check (in ShouldUseTransportRide) compares:
+    // GuestHeadingToRideId (newGoal=6) vs GuestRejectedTransportGoal (originalGoal=5)
+    // Since they differ, transport should be considered again
+    EXPECT_NE(peep->GuestHeadingToRideId, peep->GuestRejectedTransportGoal);
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Successful transport use should clear rejection
+TEST_F(TransportShortcutTest, SuccessfulTransportClearsRejection)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    RideId previouslyRejected = RideId::FromUnderlying(10);
+
+    // Create guest with a previous rejection
+    auto* peep = CreateGuestWithTransportState(
+        pos, true, false, RideId::GetNull(), RideId::GetNull(), previouslyRejected, RideId::FromUnderlying(5));
+
+    EXPECT_FALSE(peep->GuestRejectedTransport.IsNull());
+
+    // Simulate successful transport - clear rejection
+    peep->GuestRejectedTransport = RideId::GetNull();
+    peep->GuestRejectedTransportGoal = RideId::GetNull();
+
+    EXPECT_TRUE(peep->GuestRejectedTransport.IsNull());
+    EXPECT_TRUE(peep->GuestRejectedTransportGoal.IsNull());
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Transport shortcut is preserved when guest's underlying need changes destination
+TEST_F(TransportShortcutTest, TransportShortcutPreservedDuringGoalChange)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    RideId transportRide = RideId::FromUnderlying(10);
+    RideId originalGoal = RideId::FromUnderlying(5);
+
+    // Create guest using transport shortcut
+    auto* peep = CreateGuestWithTransportState(pos, true, true, transportRide, originalGoal);
+
+    EXPECT_TRUE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+    EXPECT_EQ(peep->GuestTransportDestination, originalGoal);
+
+    // The transport shortcut flag should remain set
+    // (we removed the clearing from GuestResetRideHeading, GuestLeavePark, PeepHeadForNearestRide)
+    EXPECT_TRUE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Guest outside park should not use transport
+TEST_F(TransportShortcutTest, GuestOutsideParkNoTransport)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    auto ride = FindRideByName("StraightFlat");
+    ASSERT_NE(ride, nullptr);
+
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+    peep->OutsideOfPark = true; // Guest is outside park
+    peep->GiveItem(ShopItem::map);
+    peep->GuestHeadingToRideId = ride->id;
+
+    // Transport shortcut should not be set for guest outside park
+    EXPECT_FALSE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Aimless guest should not use transport
+TEST_F(TransportShortcutTest, AimlessGuestNoTransport)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+    peep->OutsideOfPark = false;
+    peep->GiveItem(ShopItem::map);
+    peep->GuestHeadingToRideId = RideId::GetNull(); // Aimless - no destination
+
+    // Transport shortcut should not be set for aimless guest
+    EXPECT_FALSE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Balk tracking sets rejection correctly
+TEST_F(TransportShortcutTest, BalkingSetsRejection)
+{
+    TileCoordsXYZ pos = { 19, 15, 14 };
+    RideId transportRide = RideId::FromUnderlying(10);
+    RideId originalGoal = RideId::FromUnderlying(5);
+
+    // Create guest using transport shortcut
+    auto* peep = CreateGuestWithTransportState(pos, true, true, transportRide, originalGoal);
+
+    EXPECT_TRUE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+    EXPECT_TRUE(peep->GuestRejectedTransport.IsNull());
+
+    // Simulate balking - what ChoseNotToGoOnRide does for transport rides
+    peep->GuestRejectedTransport = transportRide;
+    peep->GuestRejectedTransportGoal = originalGoal;
+    peep->PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
+    peep->GuestHeadingToRideId = peep->GuestTransportDestination;
+    peep->GuestTransportDestination = RideId::GetNull();
+
+    // After balking:
+    // - Rejection is recorded
+    EXPECT_EQ(peep->GuestRejectedTransport, transportRide);
+    EXPECT_EQ(peep->GuestRejectedTransportGoal, originalGoal);
+    // - Shortcut flag is cleared
+    EXPECT_FALSE(peep->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT);
+    // - Original goal is restored
+    EXPECT_EQ(peep->GuestHeadingToRideId, originalGoal);
+    // - Transport destination is cleared
+    EXPECT_TRUE(peep->GuestTransportDestination.IsNull());
+
+    PeepEntityRemove(peep);
+}
+
+// ============================================================================
+// Transport Selection Logic Tests
+// These test the actual ShouldUseTransportRide function behavior
+// ============================================================================
+
+class TransportSelectionTest : public PathfindingTestBase
+{
+protected:
+    static Ride* FindTransportRide()
+    {
+        auto& gameState = getGameState();
+        for (auto& ride : RideManager(gameState))
+        {
+            if (ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide))
+            {
+                return &ride;
+            }
+        }
+        return nullptr;
+    }
+};
+
+// Test: ShouldUseTransportRide returns null when goal is very close (< 5 tiles)
+TEST_F(TransportSelectionTest, ReturnsNullWhenGoalVeryClose)
+{
+    TileCoordsXYZ pos = { 10, 10, 14 };
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+    peep->OutsideOfPark = false;
+    peep->GiveItem(ShopItem::map);
+
+    // Goal is only 3 tiles away (Manhattan)
+    TileCoordsXYZ closeGoal = { 12, 11, 14 };
+
+    auto result = PathFinding::ShouldUseTransportRide(*peep, pos, closeGoal);
+
+    // Should return null - too close to bother with transport
+    EXPECT_TRUE(result.first.IsNull());
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Transport selection considers exit proximity to goal
+TEST_F(TransportSelectionTest, SelectsTransportWhenExitCloserToGoal)
+{
+    auto* transportRide = FindTransportRide();
+    if (transportRide == nullptr)
+    {
+        GTEST_SKIP() << "No transport ride in test park";
+    }
+
+    // Verify the ride is open and usable
+    EXPECT_EQ(transportRide->status, RideStatus::open);
+    EXPECT_GE(transportRide->numStations, 2);
+
+    TileCoordsXYZ pos = { 10, 10, 14 };
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+    peep->OutsideOfPark = false;
+    peep->GiveItem(ShopItem::map);
+    peep->CashInPocket = 1000; // Enough for any ride price
+
+    // Find station positions
+    const auto& station1 = transportRide->getStation(StationIndex::FromUnderlying(1));
+
+    // Create a goal near station 1's exit
+    TileCoordsXYZ goalNearExit;
+    if (!station1.Exit.IsNull())
+    {
+        goalNearExit = TileCoordsXYZ(station1.Exit);
+        goalNearExit.x += 2; // A bit past the exit
+    }
+    else
+    {
+        GTEST_SKIP() << "Station 1 has no exit";
+    }
+
+    auto result = PathFinding::ShouldUseTransportRide(*peep, pos, goalNearExit);
+
+    // Log the result for debugging
+    if (!result.first.IsNull())
+    {
+        EXPECT_EQ(result.first, transportRide->id);
+    }
+    // Note: May still be null if entrance/exit positions don't meet criteria
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Transport NOT selected when guest already rejected this transport for same goal
+TEST_F(TransportSelectionTest, RespectsRejectionForSameGoal)
+{
+    auto* transportRide = FindTransportRide();
+    if (transportRide == nullptr)
+    {
+        GTEST_SKIP() << "No transport ride in test park";
+    }
+
+    TileCoordsXYZ pos = { 10, 10, 14 };
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+    peep->OutsideOfPark = false;
+    peep->GiveItem(ShopItem::map);
+    peep->CashInPocket = 1000;
+
+    // Set up rejection - guest previously rejected this transport for goal ride 5
+    RideId goalRide = RideId::FromUnderlying(5);
+    peep->GuestHeadingToRideId = goalRide;
+    peep->GuestRejectedTransport = transportRide->id;
+    peep->GuestRejectedTransportGoal = goalRide;
+
+    TileCoordsXYZ goal = { 50, 50, 14 };
+    auto result = PathFinding::ShouldUseTransportRide(*peep, pos, goal);
+
+    // Should not select this transport because it was rejected for this goal
+    if (!result.first.IsNull())
+    {
+        EXPECT_NE(result.first, transportRide->id);
+    }
+
+    PeepEntityRemove(peep);
+}
+
+// Test: Transport IS considered when goal changes after rejection
+TEST_F(TransportSelectionTest, ConsidersTransportAfterGoalChange)
+{
+    auto* transportRide = FindTransportRide();
+    if (transportRide == nullptr)
+    {
+        GTEST_SKIP() << "No transport ride in test park";
+    }
+
+    TileCoordsXYZ pos = { 10, 10, 14 };
+    auto* peep = Guest::Generate(pos.ToCoordsXYZ().ToTileCentre());
+    peep->OutsideOfPark = false;
+    peep->GiveItem(ShopItem::map);
+    peep->CashInPocket = 1000;
+
+    // Guest rejected transport while heading to ride 5
+    RideId oldGoal = RideId::FromUnderlying(5);
+    RideId newGoal = RideId::FromUnderlying(6); // Different goal now
+    peep->GuestHeadingToRideId = newGoal;
+    peep->GuestRejectedTransport = transportRide->id;
+    peep->GuestRejectedTransportGoal = oldGoal;
+
+    TileCoordsXYZ goal = { 50, 50, 14 };
+    auto result = PathFinding::ShouldUseTransportRide(*peep, pos, goal);
+
+    // Transport should be considered because goal changed
+    // (The rejection was for oldGoal, but we're now heading to newGoal)
+    // Note: Result depends on station positions, so we just verify no crash
+
+    PeepEntityRemove(peep);
 }

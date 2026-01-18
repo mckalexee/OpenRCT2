@@ -10,9 +10,11 @@
 #pragma once
 
 #include "../ride/RideTypes.h"
+#include "../ride/Station.h"
 #include "../world/Location.hpp"
 
 #include <memory>
+#include <utility>
 
 struct Peep;
 struct Guest;
@@ -34,5 +36,9 @@ namespace OpenRCT2::PathFinding
     int32_t GuestPathFindPeepSpawn(Peep& peep, uint8_t edges);
 
     int32_t GuestPathFindParkEntranceLeaving(Peep& peep, uint8_t edges);
+
+    // Transport ride selection - exposed for testing
+    std::pair<RideId, StationIndex> ShouldUseTransportRide(
+        const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos);
 
 } // namespace OpenRCT2::PathFinding

@@ -1881,6 +1881,80 @@ namespace OpenRCT2::Ui::Windows
                 ft.Add<int32_t>(peep->PathfindGoal.direction);
                 DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_PATHFIND_GOAL, ft);
             }
+
+            // Guest-specific pathfinding debug info
+            if (peep->Is<Guest>())
+            {
+                auto* guest = peep->As<Guest>();
+
+                // Heading to Ride
+                screenCoords.y += kListRowHeight;
+                {
+                    auto ft = Formatter();
+                    if (!guest->GuestHeadingToRideId.IsNull())
+                    {
+                        auto ride = GetRide(guest->GuestHeadingToRideId);
+                        if (ride != nullptr)
+                            ride->formatNameTo(ft);
+                        else
+                            ft.Add<StringId>(kStringIdNone);
+                    }
+                    else
+                    {
+                        ft.Add<StringId>(kStringIdNone);
+                    }
+                    DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_HEADING_TO_RIDE, ft);
+                }
+
+                // Has Map / Uses A*
+                screenCoords.y += kListRowHeight;
+                {
+                    auto ft = Formatter();
+                    bool hasMap = guest->HasItem(ShopItem::map);
+                    bool usesAStar = hasMap && guest->HeadingForRideOrParkExit();
+                    if (usesAStar)
+                        ft.Add<StringId>(STR_PEEP_DEBUG_MAP_YES_ASTAR);
+                    else if (hasMap)
+                        ft.Add<StringId>(STR_PEEP_DEBUG_MAP_YES);
+                    else
+                        ft.Add<StringId>(STR_PEEP_DEBUG_MAP_NO);
+                    DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_HAS_MAP, ft);
+                }
+
+                // Transport Shortcut
+                screenCoords.y += kListRowHeight;
+                {
+                    auto ft = Formatter();
+                    if (guest->PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT)
+                    {
+                        ft.Add<StringId>(STR_PEEP_DEBUG_TRANSPORT_ACTIVE);
+                        auto ride = GetRide(guest->GuestHeadingToRideId);
+                        if (ride != nullptr)
+                            ride->formatNameTo(ft);
+                        else
+                            ft.Add<StringId>(kStringIdNone);
+                    }
+                    else
+                    {
+                        ft.Add<StringId>(STR_PEEP_DEBUG_TRANSPORT_NONE);
+                    }
+                    DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_TRANSPORT_SHORTCUT, ft);
+                }
+
+                // Original Goal (when using transport shortcut)
+                if (!guest->GuestTransportDestination.IsNull())
+                {
+                    screenCoords.y += kListRowHeight;
+                    auto ft = Formatter();
+                    auto ride = GetRide(guest->GuestTransportDestination);
+                    if (ride != nullptr)
+                        ride->formatNameTo(ft);
+                    else
+                        ft.Add<StringId>(kStringIdNone);
+                    DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_ORIGINAL_GOAL, ft);
+                }
+            }
+
             screenCoords.y += kListRowHeight;
             DrawTextBasic(rt, screenCoords, STR_PEEP_DEBUG_PATHFIND_HISTORY);
             screenCoords.y += kListRowHeight;

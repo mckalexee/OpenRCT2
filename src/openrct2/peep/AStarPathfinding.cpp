@@ -24,12 +24,13 @@
 #include <cstdlib>
 #include <queue>
 #include <unordered_map>
+#include <vector>
 
 namespace OpenRCT2::PathFinding
 {
 #pragma region A* Pathfinding Logging
     // Set to true to enable A* pathfinding logging.
-    static constexpr bool kLogAStarPathfinding = true;
+    static constexpr bool kLogAStarPathfinding = false;
 
     // Only log for guests with this name (set empty to log all)
     static constexpr const char* kLogAStarPeepName = "Pete Pathfinder";
@@ -499,6 +500,7 @@ namespace OpenRCT2::PathFinding
 
                 openSet.push(neighbor);
             }
+
         }
 
         // Goal not found - return invalid direction to fall back to DFS

@@ -17,7 +17,9 @@
 #include "../entity/Guest.h"
 #include "../entity/Staff.h"
 #include "../profiling/Profiling.h"
+#include "../ride/Ride.h"
 #include "../ride/RideData.h"
+#include "../ride/RideManager.hpp"
 #include "../ride/Station.h"
 #include "../ride/Track.h"
 #include "../scenario/Scenario.h"
@@ -89,13 +91,15 @@ namespace OpenRCT2::PathFinding
     // In case this is set to true it will enable code paths that log path finding. The peep will additionally
     // require to have PEEP_FLAGS_DEBUG_PATHFINDING set in PeepFlags in order to activate logging.
     static constexpr bool kLogPathfinding = false;
+    static constexpr const char* kLogPathfindingPeepName = "Pete Pathfinder";
 
     template<typename... TArgs>
     static void LogPathfinding([[maybe_unused]] const Peep* peep, [[maybe_unused]] const char* format, TArgs&&... args)
     {
         if constexpr (kLogPathfinding)
         {
-            if ((peep->PeepFlags & PEEP_FLAGS_DEBUG_PATHFINDING) == 0)
+            // Use name-based check like A* logging does
+            if (peep != nullptr && kLogPathfindingPeepName[0] != '\0' && peep->GetName() != kLogPathfindingPeepName)
                 return;
 
             char buffer[256];
@@ -103,11 +107,11 @@ namespace OpenRCT2::PathFinding
 
             if (peep != nullptr)
             {
-                LOG_INFO("[%05u:%s] %s", peep->Id.ToUnderlying(), peep->GetName().c_str(), buffer);
+                LOG_INFO("[Pathfinding][%05u:%s] %s", peep->Id.ToUnderlying(), peep->GetName().c_str(), buffer);
             }
             else
             {
-                LOG_INFO("%s", buffer);
+                LOG_INFO("[Pathfinding] %s", buffer);
             }
         }
     }
@@ -1933,6 +1937,359 @@ namespace OpenRCT2::PathFinding
 
         return StationIndex::FromUnderlying(0);
     }
+
+#pragma region Transport Ride Decision
+
+    // Minimum distance savings required to use transport (in tiles)
+    static constexpr int32_t kTransportMinSavings = 30;
+
+    // Boarding overhead (equivalent to walking this many tiles)
+    static constexpr int32_t kTransportBoardingCost = 20;
+
+    // Divide SegmentTime by this for ride travel cost
+    static constexpr int32_t kTransportTimeScale = 5;
+
+    // Determine which station a guest exits at (always the next station)
+    static StationIndex GetNextStation(const Ride& ride, StationIndex fromStation)
+    {
+        if (ride.numStations < 2)
+            return StationIndex::GetNull();
+
+        switch (ride.mode)
+        {
+            case RideMode::continuousCircuit:
+            case RideMode::continuousCircuitBlockSectioned:
+            {
+                // Station[i] -> Station[(i+1) % numStations]
+                auto nextIdx = (fromStation.ToUnderlying() + 1) % ride.numStations;
+                return StationIndex::FromUnderlying(nextIdx);
+            }
+
+            case RideMode::shuttle:
+            case RideMode::stationToStation:
+            {
+                // Toggle between station 0 and 1
+                if (fromStation.ToUnderlying() == 0)
+                    return StationIndex::FromUnderlying(1);
+                else
+                    return StationIndex::FromUnderlying(0);
+            }
+
+            default:
+                return StationIndex::GetNull();
+        }
+    }
+
+    // Check if a transport ride is usable by a guest
+    static bool IsTransportRideUsable(const Ride& ride, const Guest& guest)
+    {
+        // Must be a transport ride
+        if (!ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide))
+            return false;
+
+        // Must be open
+        if (ride.status != RideStatus::open)
+            return false;
+
+        // Check if broken down
+        if (ride.lifecycleFlags & RIDE_LIFECYCLE_BROKEN_DOWN)
+            return false;
+
+        // Check affordability (free transport rides are always ok)
+        auto price = RideGetPrice(ride);
+        if (price > 0 && price > guest.CashInPocket)
+            return false;
+
+        return true;
+    }
+
+    // Find the path tile adjacent to a ride entrance/exit
+    static TileCoordsXYZ FindAdjacentPathTile(const TileCoordsXYZD& entrance)
+    {
+        if (entrance.IsNull())
+            return { 0, 0, 0 };
+
+        // The entrance faces a direction; the path is in front of it
+        TileCoordsXYZ pathPos;
+        pathPos.x = entrance.x + TileDirectionDelta[entrance.direction].x;
+        pathPos.y = entrance.y + TileDirectionDelta[entrance.direction].y;
+
+        // Find the actual path element at this position
+        TileElement* element = MapGetFirstElementAt(pathPos);
+        if (element != nullptr)
+        {
+            do
+            {
+                if (element->GetType() == TileElementType::Path)
+                {
+                    pathPos.z = element->BaseHeight;
+                    return pathPos;
+                }
+            } while (!(element++)->IsLastForTile());
+        }
+
+        // Fallback to entrance Z if no path found
+        pathPos.z = entrance.z;
+        return pathPos;
+    }
+
+    /**
+     * Calculates the goal position for a guest who is heading somewhere.
+     * Returns (0,0,0) if the guest has no valid goal.
+     *
+     * @param peep The guest
+     * @param currentPos Current tile position of the guest (for finding nearest entrance)
+     * @return Goal tile position, or (0,0,0) if no valid goal
+     */
+    static TileCoordsXYZ GetCurrentGoalPosition(const Guest& peep, const TileCoordsXYZ& currentPos)
+    {
+        TileCoordsXYZ goalPos{ 0, 0, 0 };
+
+        if (peep.PeepFlags & PEEP_FLAGS_LEAVING_PARK)
+        {
+            // For leaving park, use nearest park entrance as goal
+            auto& gameState = getGameState();
+            int32_t bestDist = std::numeric_limits<int32_t>::max();
+            for (const auto& entrance : gameState.park.entrances)
+            {
+                auto entranceTile = TileCoordsXYZ(entrance);
+                int32_t dist = std::abs(currentPos.x - entranceTile.x) + std::abs(currentPos.y - entranceTile.y);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    goalPos = entranceTile;
+                }
+            }
+        }
+        else if (!peep.GuestHeadingToRideId.IsNull())
+        {
+            // For heading to ride, use the nearest ride entrance as goal
+            auto* targetRide = GetRide(peep.GuestHeadingToRideId);
+            LogPathfinding(&peep, "GetCurrentGoalPosition: rideId=%d, targetRide=%p",
+                peep.GuestHeadingToRideId.ToUnderlying(), static_cast<void*>(targetRide));
+            if (targetRide != nullptr)
+            {
+                // Count stations with entrances (shops/facilities have 0)
+                int32_t numEntranceStations = 0;
+                for (const auto& station : targetRide->getStations())
+                {
+                    // Skip empty/invalid station slots
+                    if (station.Start.IsNull())
+                        continue;
+
+                    if (!station.Entrance.IsNull())
+                        numEntranceStations++;
+                }
+
+                LogPathfinding(&peep, "  numEntranceStations=%d", numEntranceStations);
+
+                int32_t bestDist = std::numeric_limits<int32_t>::max();
+                int stationCount = 0;
+
+                // Find closest station
+                for (const auto& station : targetRide->getStations())
+                {
+                    // Skip empty/invalid station slots
+                    if (station.Start.IsNull())
+                        continue;
+
+                    stationCount++;
+                    TileCoordsXYZ stationPos;
+
+                    if (numEntranceStations == 0)
+                    {
+                        // SHOPS/FACILITIES: Use station Start position (no entrance)
+                        auto entranceXY = TileCoordsXY(station.Start);
+                        stationPos.x = entranceXY.x;
+                        stationPos.y = entranceXY.y;
+                        stationPos.z = station.Height;
+                        LogPathfinding(&peep, "  Station %d (shop/facility): Start at (%d,%d,%d)",
+                            stationCount, stationPos.x, stationPos.y, stationPos.z);
+                    }
+                    else
+                    {
+                        // REGULAR RIDES: Use Entrance position
+                        if (station.Entrance.IsNull())
+                        {
+                            LogPathfinding(&peep, "  Station %d: Entrance.IsNull, skipping", stationCount);
+                            continue;  // Skip stations without entrances
+                        }
+                        stationPos = TileCoordsXYZ(station.Entrance);
+                        LogPathfinding(&peep, "  Station %d: Entrance at (%d,%d,%d)",
+                            stationCount, stationPos.x, stationPos.y, stationPos.z);
+                    }
+
+                    int32_t dist = std::abs(currentPos.x - stationPos.x) + std::abs(currentPos.y - stationPos.y);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        goalPos = stationPos;
+                    }
+                }
+                LogPathfinding(&peep, "  Total stations checked: %d, goalPos=(%d,%d,%d)",
+                    stationCount, goalPos.x, goalPos.y, goalPos.z);
+            }
+        }
+        else
+        {
+            LogPathfinding(&peep, "GetCurrentGoalPosition: no destination (rideId is null)");
+        }
+
+        return goalPos;
+    }
+
+    /**
+     * Determines if a transport ride should be used to reach the goal faster.
+     * Returns the transport ride ID if beneficial, null otherwise.
+     *
+     * @param guest The guest considering the transport
+     * @param currentPos Current tile position of the guest
+     * @param goalPos Goal tile position
+     * @return Pair of (RideId, StationIndex) if transport is beneficial, null RideId otherwise
+     */
+    std::pair<RideId, StationIndex> ShouldUseTransportRide(
+        const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos)
+    {
+        // Calculate direct walking distance to goal (Manhattan)
+        int32_t directDistance = std::abs(currentPos.x - goalPos.x) + std::abs(currentPos.y - goalPos.y);
+
+        // Only skip if absurdly close - let actual cost comparison decide for other cases
+        // (Manhattan distance doesn't account for winding paths around obstacles)
+        if (directDistance < 5)
+            return { RideId::GetNull(), StationIndex::GetNull() };
+
+        RideId bestRideId = RideId::GetNull();
+        StationIndex bestStationIndex = StationIndex::GetNull();
+        int32_t bestTotalCost = std::numeric_limits<int32_t>::max(); // Find lowest cost transport option
+
+        auto& gameState = getGameState();
+        int rideCount = 0;
+        for (auto& ride : RideManager(gameState))
+        {
+            rideCount++;
+            bool isTransport = ride.getRideTypeDescriptor().HasFlag(RtdFlag::isTransportRide);
+            if (!isTransport)
+                continue;
+
+            LogPathfinding(&guest, "Checking transport ride: %s (id=%d, status=%d, numStations=%d, mode=%d)",
+                ride.getName().c_str(), ride.id.ToUnderlying(), static_cast<int>(ride.status), ride.numStations,
+                static_cast<int>(ride.mode));
+
+            if (!IsTransportRideUsable(ride, guest))
+            {
+                LogPathfinding(&guest, "  -> Not usable (status=%d, broken=%d)",
+                    static_cast<int>(ride.status), (ride.lifecycleFlags & RIDE_LIFECYCLE_BROKEN_DOWN) ? 1 : 0);
+                continue;
+            }
+
+            // Skip if we already rejected this transport for the current goal
+            // This prevents balk loops where guest keeps trying the same transport
+            if (!guest.GuestRejectedTransport.IsNull() && ride.id == guest.GuestRejectedTransport
+                && guest.GuestHeadingToRideId == guest.GuestRejectedTransportGoal)
+            {
+                continue;
+            }
+
+            // Check each station of this transport ride
+            LogPathfinding(&guest, "  Checking %d stations...", ride.numStations);
+            for (StationIndex::UnderlyingType stationIdx = 0; stationIdx < ride.numStations; stationIdx++)
+            {
+                auto stationIndex = StationIndex::FromUnderlying(stationIdx);
+                const auto& station = ride.getStation(stationIndex);
+
+                // Skip if entrance doesn't exist
+                if (station.Entrance.IsNull())
+                {
+                    LogPathfinding(&guest, "    Station %d: no entrance", stationIdx);
+                    continue;
+                }
+
+                // Find the path tile adjacent to this entrance
+                TileCoordsXYZ entrancePathPos = FindAdjacentPathTile(station.Entrance);
+                LogPathfinding(&guest, "    Station %d: entrance at (%d,%d,%d), path at (%d,%d,%d)",
+                    stationIdx, station.Entrance.x, station.Entrance.y, station.Entrance.z,
+                    entrancePathPos.x, entrancePathPos.y, entrancePathPos.z);
+
+                // Check height compatibility (must be reachable without major elevation change)
+                int32_t dz = std::abs(currentPos.z - entrancePathPos.z);
+                if (dz > 4)
+                {
+                    LogPathfinding(&guest, "    Station %d: height diff %d > 4, skipping", stationIdx, dz);
+                    continue;
+                }
+
+                // Find the next station (where guest will exit)
+                StationIndex exitStationIdx = GetNextStation(ride, stationIndex);
+                if (exitStationIdx.IsNull())
+                {
+                    LogPathfinding(&guest, "    Station %d: no exit station", stationIdx);
+                    continue;
+                }
+
+                const auto& exitStation = ride.getStation(exitStationIdx);
+
+                // Skip if exit doesn't exist
+                if (exitStation.Exit.IsNull())
+                {
+                    LogPathfinding(&guest, "    Station %d: exit station has no exit", stationIdx);
+                    continue;
+                }
+
+                // Find the path tile adjacent to the exit
+                TileCoordsXYZ exitPathPos = FindAdjacentPathTile(exitStation.Exit);
+                LogPathfinding(&guest, "    Station %d: exit path at (%d,%d,%d)",
+                    stationIdx, exitPathPos.x, exitPathPos.y, exitPathPos.z);
+
+                // Calculate costs
+                int32_t walkToEntrance = std::abs(currentPos.x - entrancePathPos.x)
+                    + std::abs(currentPos.y - entrancePathPos.y);
+                int32_t walkFromExit = std::abs(exitPathPos.x - goalPos.x)
+                    + std::abs(exitPathPos.y - goalPos.y);
+                int32_t travelCost = std::max(station.SegmentTime / kTransportTimeScale, 5);
+
+                int32_t totalCost = walkToEntrance + kTransportBoardingCost + travelCost + walkFromExit;
+
+                LogPathfinding(&guest, "    Station %d: walkTo=%d, travel=%d, walkFrom=%d, total=%d, direct=%d, exitDist=%d",
+                    stationIdx, walkToEntrance, travelCost, walkFromExit, totalCost, directDistance, walkFromExit);
+
+                // Transport is beneficial if:
+                // 1. The exit gets us significantly closer to goal than current position
+                // 2. We're not going too far out of the way to reach the entrance
+                // Note: Manhattan distance underestimates actual path cost, so we use relaxed criteria
+                bool exitCloser = walkFromExit < directDistance;  // Exit is closer to goal than we are now
+                bool entranceReasonable = walkToEntrance < directDistance;  // Not going backwards too far
+                bool worthwhile = exitCloser && entranceReasonable;
+
+                if (worthwhile && totalCost < bestTotalCost)
+                {
+                    bestRideId = ride.id;
+                    bestStationIndex = stationIndex;
+                    bestTotalCost = totalCost;
+
+                    LogPathfinding(
+                        &guest, "Transport candidate: %s station %d, cost=%d (exitDist=%d < currentDist=%d)",
+                        ride.getName().c_str(), stationIdx, totalCost, walkFromExit, directDistance);
+                }
+                else
+                {
+                    LogPathfinding(&guest, "    Station %d: NOT selected (exitCloser=%d, entranceOK=%d, cost=%d vs best=%d)",
+                        stationIdx, exitCloser ? 1 : 0, entranceReasonable ? 1 : 0, totalCost, bestTotalCost);
+                }
+            }
+        }
+
+        if (!bestRideId.IsNull())
+        {
+            LogPathfinding(
+                &guest, "Selected transport: ride %d station %d", bestRideId.ToUnderlying(),
+                bestStationIndex.ToUnderlying());
+        }
+
+        return { bestRideId, bestStationIndex };
+    }
+
+#pragma endregion
+
     /**
      *
      *  rct2: 0x00694C35
@@ -1947,6 +2304,86 @@ namespace OpenRCT2::PathFinding
         }
 
         TileCoordsXYZ loc{ peep.NextLoc };
+
+        // ========== TRANSPORT CHECK - MUST BE EARLY ==========
+        // Check if transport ride would help (only if has map and not already using transport)
+        // This check happens BEFORE any pathfinding decisions to catch all guests with maps
+        bool hasMap = peep.HasItem(ShopItem::map);
+        bool hasShortcut = peep.PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT;
+        bool hasTransportDest = !peep.GuestTransportDestination.IsNull();
+        bool outsidePark = peep.OutsideOfPark;
+
+        LogPathfinding(
+            &peep, "Transport check: hasMap=%d, hasShortcut=%d, hasTransportDest=%d, outsidePark=%d", hasMap, hasShortcut,
+            hasTransportDest, outsidePark);
+
+        // Debug: if shortcut is active, show what ride we're heading to
+        if (hasShortcut)
+        {
+            LogPathfinding(
+                &peep, "  Shortcut active: GuestHeadingToRideId=%d, GuestTransportDestination=%d",
+                peep.GuestHeadingToRideId.IsNull() ? -1 : peep.GuestHeadingToRideId.ToUnderlying(),
+                peep.GuestTransportDestination.IsNull() ? -1 : peep.GuestTransportDestination.ToUnderlying());
+        }
+
+        if (hasMap && !hasShortcut && !hasTransportDest && !outsidePark)
+        {
+            // Guest must have a destination (heading to ride or leaving park)
+            bool hasDestination = !peep.GuestHeadingToRideId.IsNull() || (peep.PeepFlags & PEEP_FLAGS_LEAVING_PARK);
+
+            LogPathfinding(
+                &peep, "Transport eligible: hasDestination=%d, headingToRide=%d, leavingPark=%d", hasDestination,
+                peep.GuestHeadingToRideId.IsNull() ? -1 : peep.GuestHeadingToRideId.ToUnderlying(),
+                (peep.PeepFlags & PEEP_FLAGS_LEAVING_PARK) ? 1 : 0);
+
+            if (hasDestination)
+            {
+                TileCoordsXYZ goalPos = GetCurrentGoalPosition(peep, loc);
+
+                LogPathfinding(&peep, "Transport goal: (%d,%d,%d) from loc (%d,%d,%d)", goalPos.x, goalPos.y, goalPos.z, loc.x, loc.y, loc.z);
+
+                // Only check transport if we have a valid goal
+                if (goalPos.x != 0 || goalPos.y != 0)
+                {
+                    auto [transportRide, stationIndex] = ShouldUseTransportRide(peep, loc, goalPos);
+
+                    LogPathfinding(
+                        &peep, "ShouldUseTransportRide returned: ride=%d",
+                        transportRide.IsNull() ? -1 : transportRide.ToUnderlying());
+
+                    if (!transportRide.IsNull())
+                    {
+                        LogPathfinding(
+                            &peep, "SETTING SHORTCUT: originalDest=%d, newDest=%d (chairlift)",
+                            peep.GuestHeadingToRideId.IsNull() ? -1 : peep.GuestHeadingToRideId.ToUnderlying(),
+                            transportRide.ToUnderlying());
+
+                        // Store original destination (may be null if leaving park)
+                        peep.GuestTransportDestination = peep.GuestHeadingToRideId;
+                        // Set destination to transport ride
+                        peep.GuestHeadingToRideId = transportRide;
+                        peep.PeepFlags |= PEEP_FLAGS_TRANSPORT_SHORTCUT;
+                        peep.GuestIsLostCountdown = 200;
+                        peep.ResetPathfindGoal();
+                        peep.WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
+
+                        // Clear any previous rejection since we're trying a (possibly different) transport
+                        peep.GuestRejectedTransport = RideId::GetNull();
+                        peep.GuestRejectedTransportGoal = RideId::GetNull();
+
+                        // Verify the shortcut was set correctly
+                        LogPathfinding(
+                            &peep, "SHORTCUT SET: GuestHeadingToRideId=%d, GuestTransportDestination=%d, flag=%d",
+                            peep.GuestHeadingToRideId.IsNull() ? -1 : peep.GuestHeadingToRideId.ToUnderlying(),
+                            peep.GuestTransportDestination.IsNull() ? -1 : peep.GuestTransportDestination.ToUnderlying(),
+                            (peep.PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT) ? 1 : 0);
+
+                        // Continue pathfinding - it will now navigate to the transport entrance
+                    }
+                }
+            }
+        }
+        // ========== END TRANSPORT CHECK ==========
 
         auto* pathElement = MapGetPathElementAt(loc);
         if (pathElement == nullptr)
