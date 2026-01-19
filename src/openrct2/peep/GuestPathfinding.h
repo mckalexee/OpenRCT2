@@ -38,8 +38,10 @@ namespace OpenRCT2::PathFinding
     int32_t GuestPathFindParkEntranceLeaving(Peep& peep, uint8_t edges);
 
     // Transport ride selection - exposed for testing
+    // destinationUnreachable: true when normal pathfinding failed, relaxes distance criteria
     std::pair<RideId, StationIndex> ShouldUseTransportRide(
-        const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos);
+        const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos,
+        bool destinationUnreachable = false);
 
     // Invalidate cached list of transport rides (call when rides are added/removed)
     void InvalidateTransportRideCache();

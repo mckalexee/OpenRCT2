@@ -2338,6 +2338,7 @@ namespace OpenRCT2
             guest.GuestTransportDestination = RideId::GetNull();
             guest.GuestRejectedTransport = RideId::GetNull();
             guest.GuestRejectedTransportGoal = RideId::GetNull();
+            guest.GuestRejectedTransportTimeout = 0;
             guest.GuestTransportTargetStation = StationIndex::GetNull();
             guest.PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
         }

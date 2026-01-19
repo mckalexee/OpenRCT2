@@ -2463,6 +2463,7 @@ void Guest::ChoseNotToGoOnRide(const Ride& ride, bool peepAtRide, bool updateLas
             // Record the rejection so we don't try this transport again for this goal
             GuestRejectedTransport = ride.id;
             GuestRejectedTransportGoal = GuestTransportDestination;
+            GuestRejectedTransportTimeout = 2400; // 60 seconds at 40 FPS - allow retry after timeout
 
             // Clear shortcut and restore original goal
             PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
@@ -2514,6 +2515,7 @@ static void GuestTriedToEnterFullQueue(Guest& guest, Ride& ride)
         {
             guest.GuestRejectedTransport = ride.id;
             guest.GuestRejectedTransportGoal = guest.GuestTransportDestination;
+            guest.GuestRejectedTransportTimeout = 2400; // 60 seconds at 40 FPS - allow retry after timeout
             guest.PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
             guest.GuestHeadingToRideId = guest.GuestTransportDestination;
             guest.GuestTransportDestination = RideId::GetNull();
@@ -5392,6 +5394,18 @@ void Guest::Update()
         if (++PreviousRideTimeOut >= 720)
         {
             PreviousRide = RideId::GetNull();
+        }
+    }
+
+    // Transport rejection timeout - allow guest to retry after 60 seconds
+    if (GuestRejectedTransportTimeout > 0)
+    {
+        GuestRejectedTransportTimeout--;
+        if (GuestRejectedTransportTimeout == 0)
+        {
+            // Rejection expired - guest can try this transport again
+            GuestRejectedTransport = RideId::GetNull();
+            GuestRejectedTransportGoal = RideId::GetNull();
         }
     }
 

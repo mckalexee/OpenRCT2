@@ -2172,16 +2172,29 @@ namespace OpenRCT2::PathFinding
     }
 
     /**
+     * Checks if a path exists from one position to another using A* pathfinding.
+     * Used to verify transport entrances are actually reachable.
+     */
+    static bool CanPathToPosition(const Guest& guest, const TileCoordsXYZ& from, const TileCoordsXYZ& to)
+    {
+        // AStarChooseDirection returns kInvalidDirection if no path exists
+        auto direction = AStarChooseDirection(from, to, guest, true, RideId::GetNull());
+        return direction != kInvalidDirection;
+    }
+
+    /**
      * Determines if a transport ride should be used to reach the goal faster.
      * Returns the transport ride ID if beneficial, null otherwise.
      *
      * @param guest The guest considering the transport
      * @param currentPos Current tile position of the guest
      * @param goalPos Goal tile position
+     * @param destinationUnreachable If true, normal pathfinding failed - relax distance criteria
      * @return Pair of (RideId, StationIndex) if transport is beneficial, null RideId otherwise
      */
     std::pair<RideId, StationIndex> ShouldUseTransportRide(
-        const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos)
+        const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos,
+        bool destinationUnreachable)
     {
         // Calculate direct walking distance to goal (Manhattan + height-weighted)
         int32_t directHeightCost = std::abs(currentPos.z - goalPos.z) * kHeightWeight;
@@ -2189,7 +2202,8 @@ namespace OpenRCT2::PathFinding
             + directHeightCost;
 
         // Skip if already close to goal - not worth using transport
-        if (directDistance < kMinGoalDistanceForTransport)
+        // (but don't skip in destinationUnreachable mode - transport may be the only way)
+        if (!destinationUnreachable && directDistance < kMinGoalDistanceForTransport)
             return { RideId::GetNull(), StationIndex::GetNull() };
 
         RideId bestRideId = RideId::GetNull();
@@ -2272,12 +2286,23 @@ namespace OpenRCT2::PathFinding
                     + std::abs(currentPos.y - entrancePathPos.y)
                     + entranceHeightCost;
 
-                // Skip if entrance is too far away
-                if (walkToEntrance > kMaxEntranceDistance)
+                // Skip if entrance is too far away (only in normal mode, not when destination unreachable)
+                if (!destinationUnreachable && walkToEntrance > kMaxEntranceDistance)
                 {
                     LogPathfinding(&guest, "    Station %d: entrance too far (%d > %d)",
                         stationIdx, walkToEntrance, kMaxEntranceDistance);
                     continue;
+                }
+
+                // When destination is unreachable, verify the entrance IS reachable via actual pathfinding
+                if (destinationUnreachable)
+                {
+                    if (!CanPathToPosition(guest, currentPos, entrancePathPos))
+                    {
+                        LogPathfinding(&guest, "    Station %d: entrance unreachable (A* failed)", stationIdx);
+                        continue;
+                    }
+                    LogPathfinding(&guest, "    Station %d: entrance reachable (A* success)", stationIdx);
                 }
 
                 int32_t exitHeightCost = std::abs(exitPathPos.z - goalPos.z) * kHeightWeight;
@@ -2295,11 +2320,22 @@ namespace OpenRCT2::PathFinding
                 LogPathfinding(&guest, "    Station %d: walkTo=%d, travel=%d, walkFrom=%d, total=%d, direct=%d",
                     stationIdx, walkToEntrance, travelCost, walkFromExit, totalCost, directDistance);
 
-                // Transport is beneficial if total walking is less than walking directly
-                // (ignore ride time - guest wants to sit/rest rather than walk)
+                // Determine if transport is worthwhile
                 int32_t totalWalking = walkToEntrance + walkFromExit;
-                bool savesWalking = totalWalking < directDistance;
-                bool worthwhile = savesWalking;
+                bool worthwhile;
+                if (destinationUnreachable)
+                {
+                    // When destination is unreachable, just need exit to be closer than current position
+                    worthwhile = (walkFromExit < directDistance);
+                    LogPathfinding(&guest, "    Station %d: unreachable mode, exitCloser=%d (walkFrom=%d < direct=%d)",
+                        stationIdx, worthwhile ? 1 : 0, walkFromExit, directDistance);
+                }
+                else
+                {
+                    // Normal mode: total walking must be less than walking directly
+                    // (ignore ride time - guest wants to sit/rest rather than walk)
+                    worthwhile = (totalWalking < directDistance);
+                }
 
                 if (worthwhile && totalCost < bestTotalCost)
                 {
@@ -2313,8 +2349,8 @@ namespace OpenRCT2::PathFinding
                 }
                 else
                 {
-                    LogPathfinding(&guest, "    Station %d: NOT selected (savesWalking=%d, totalWalk=%d, direct=%d, cost=%d vs best=%d)",
-                        stationIdx, savesWalking ? 1 : 0, totalWalking, directDistance, totalCost, bestTotalCost);
+                    LogPathfinding(&guest, "    Station %d: NOT selected (worthwhile=%d, totalWalk=%d, direct=%d, cost=%d vs best=%d)",
+                        stationIdx, worthwhile ? 1 : 0, totalWalking, directDistance, totalCost, bestTotalCost);
                 }
             }
         }
@@ -2677,6 +2713,53 @@ namespace OpenRCT2::PathFinding
              * This lets the heuristic search "try again" in case the player has
              * edited the path layout or the mechanic was already stuck in the
              * save game (e.g. with a worse version of the pathfinding). */
+
+            // ========== FALLBACK: Try transport when destination is unreachable ==========
+            // If normal pathfinding failed, try using transport rides as the only way to reach destination
+            // This helps guests on islands that are only connected by chairlifts, etc.
+            if (hasMap && !hasShortcut && !outsidePark)
+            {
+                TileCoordsXYZ currentLoc{ peep.NextLoc };
+                TileCoordsXYZ goalPos = GetCurrentGoalPosition(peep, currentLoc);
+
+                LogPathfinding(
+                    &peep, "Pathfinding failed - trying transport fallback. Goal: (%d,%d,%d)", goalPos.x, goalPos.y, goalPos.z);
+
+                if (goalPos.x != 0 || goalPos.y != 0)
+                {
+                    // Call with destinationUnreachable=true to relax distance criteria
+                    auto [transportRide, stationIndex] = ShouldUseTransportRide(peep, currentLoc, goalPos, true);
+
+                    if (!transportRide.IsNull())
+                    {
+                        LogPathfinding(
+                            &peep, "FALLBACK: Found transport ride %d to reach unreachable destination",
+                            transportRide.ToUnderlying());
+
+                        // Store original destination
+                        peep.GuestTransportDestination = peep.GuestHeadingToRideId;
+                        // Set destination to transport ride
+                        peep.GuestHeadingToRideId = transportRide;
+                        // Store which station to board at
+                        peep.GuestTransportTargetStation = stationIndex;
+                        peep.PeepFlags |= PEEP_FLAGS_TRANSPORT_SHORTCUT;
+                        peep.GuestIsLostCountdown = 200;
+                        peep.ResetPathfindGoal();
+                        peep.WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
+
+                        // Clear any previous rejection since we're trying a (possibly different) transport
+                        peep.GuestRejectedTransport = RideId::GetNull();
+                        peep.GuestRejectedTransportGoal = RideId::GetNull();
+
+                        // Re-run pathfinding - it will now navigate to the transport entrance
+                        return CalculateNextDestination(peep);
+                    }
+
+                    LogPathfinding(&peep, "FALLBACK: No suitable transport ride found");
+                }
+            }
+            // ========== END FALLBACK ==========
+
             peep.ResetPathfindGoal();
 
             LogPathfinding(&peep, "Completed CalculateNextDestination - failed to choose a direction == aimless.");

@@ -268,6 +268,7 @@ public:
     RideId GuestTransportDestination;     // Original destination when using transport as shortcut
     RideId GuestRejectedTransport;        // Transport ride we balked at
     RideId GuestRejectedTransportGoal;    // The goal we were trying to reach when we rejected it
+    uint16_t GuestRejectedTransportTimeout; // Ticks until rejection clears (0 = no active rejection)
     StationIndex GuestTransportTargetStation; // Which station to board at when using transport shortcut
     uint8_t GuestIsLostCountdown;
     uint8_t GuestTimeOnRide;
