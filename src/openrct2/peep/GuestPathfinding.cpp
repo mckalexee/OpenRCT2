@@ -1971,11 +1971,16 @@ namespace OpenRCT2::PathFinding
     // Minimum distance savings required to use transport (in tiles)
     static constexpr int32_t kTransportMinSavings = 30;
 
-    // Boarding overhead (equivalent to walking this many tiles)
-    static constexpr int32_t kTransportBoardingCost = 20;
-
     // Divide SegmentTime by this for ride travel cost
     static constexpr int32_t kTransportTimeScale = 5;
+
+    // Fallback travel cost for untested rides (disfavors them vs tested rides)
+    static constexpr int32_t kUntestedTravelCost = 20;
+
+    // Transport ride distance criteria
+    static constexpr int32_t kMinGoalDistanceForTransport = 25;  // Don't use transport if already close
+    static constexpr int32_t kMaxEntranceDistance = 20;          // Max walk to reach entrance (height-weighted)
+    static constexpr int32_t kHeightWeight = 3;                  // 1 Z-unit = 3 tiles equivalent
 
     // Determine which station a guest exits at (always the next station)
     static StationIndex GetNextStation(const Ride& ride, StationIndex fromStation)
@@ -2178,12 +2183,13 @@ namespace OpenRCT2::PathFinding
     std::pair<RideId, StationIndex> ShouldUseTransportRide(
         const Guest& guest, const TileCoordsXYZ& currentPos, const TileCoordsXYZ& goalPos)
     {
-        // Calculate direct walking distance to goal (Manhattan)
-        int32_t directDistance = std::abs(currentPos.x - goalPos.x) + std::abs(currentPos.y - goalPos.y);
+        // Calculate direct walking distance to goal (Manhattan + height-weighted)
+        int32_t directHeightCost = std::abs(currentPos.z - goalPos.z) * kHeightWeight;
+        int32_t directDistance = std::abs(currentPos.x - goalPos.x) + std::abs(currentPos.y - goalPos.y)
+            + directHeightCost;
 
-        // Only skip if absurdly close - let actual cost comparison decide for other cases
-        // (Manhattan distance doesn't account for winding paths around obstacles)
-        if (directDistance < 5)
+        // Skip if already close to goal - not worth using transport
+        if (directDistance < kMinGoalDistanceForTransport)
             return { RideId::GetNull(), StationIndex::GetNull() };
 
         RideId bestRideId = RideId::GetNull();
@@ -2238,14 +2244,6 @@ namespace OpenRCT2::PathFinding
                     stationIdx, station.Entrance.x, station.Entrance.y, station.Entrance.z,
                     entrancePathPos.x, entrancePathPos.y, entrancePathPos.z);
 
-                // Check height compatibility (must be reachable without major elevation change)
-                int32_t dz = std::abs(currentPos.z - entrancePathPos.z);
-                if (dz > 4)
-                {
-                    LogPathfinding(&guest, "    Station %d: height diff %d > 4, skipping", stationIdx, dz);
-                    continue;
-                }
-
                 // Find the next station (where guest will exit)
                 StationIndex exitStationIdx = GetNextStation(ride, stationIndex);
                 if (exitStationIdx.IsNull())
@@ -2268,25 +2266,40 @@ namespace OpenRCT2::PathFinding
                 LogPathfinding(&guest, "    Station %d: exit path at (%d,%d,%d)",
                     stationIdx, exitPathPos.x, exitPathPos.y, exitPathPos.z);
 
-                // Calculate costs
+                // Calculate costs (Manhattan + height-weighted)
+                int32_t entranceHeightCost = std::abs(currentPos.z - entrancePathPos.z) * kHeightWeight;
                 int32_t walkToEntrance = std::abs(currentPos.x - entrancePathPos.x)
-                    + std::abs(currentPos.y - entrancePathPos.y);
+                    + std::abs(currentPos.y - entrancePathPos.y)
+                    + entranceHeightCost;
+
+                // Skip if entrance is too far away
+                if (walkToEntrance > kMaxEntranceDistance)
+                {
+                    LogPathfinding(&guest, "    Station %d: entrance too far (%d > %d)",
+                        stationIdx, walkToEntrance, kMaxEntranceDistance);
+                    continue;
+                }
+
+                int32_t exitHeightCost = std::abs(exitPathPos.z - goalPos.z) * kHeightWeight;
                 int32_t walkFromExit = std::abs(exitPathPos.x - goalPos.x)
-                    + std::abs(exitPathPos.y - goalPos.y);
-                int32_t travelCost = std::max(station.SegmentTime / kTransportTimeScale, 5);
+                    + std::abs(exitPathPos.y - goalPos.y)
+                    + exitHeightCost;
 
-                int32_t totalCost = walkToEntrance + kTransportBoardingCost + travelCost + walkFromExit;
+                // Use actual segment time if tested, otherwise fallback to disfavor untested rides
+                int32_t travelCost = (station.SegmentTime > 0)
+                    ? (station.SegmentTime / kTransportTimeScale)
+                    : kUntestedTravelCost;
 
-                LogPathfinding(&guest, "    Station %d: walkTo=%d, travel=%d, walkFrom=%d, total=%d, direct=%d, exitDist=%d",
-                    stationIdx, walkToEntrance, travelCost, walkFromExit, totalCost, directDistance, walkFromExit);
+                int32_t totalCost = walkToEntrance + travelCost + walkFromExit;
 
-                // Transport is beneficial if:
-                // 1. The exit gets us significantly closer to goal than current position
-                // 2. We're not going too far out of the way to reach the entrance
-                // Note: Manhattan distance underestimates actual path cost, so we use relaxed criteria
-                bool exitCloser = walkFromExit < directDistance;  // Exit is closer to goal than we are now
-                bool entranceReasonable = walkToEntrance < directDistance;  // Not going backwards too far
-                bool worthwhile = exitCloser && entranceReasonable;
+                LogPathfinding(&guest, "    Station %d: walkTo=%d, travel=%d, walkFrom=%d, total=%d, direct=%d",
+                    stationIdx, walkToEntrance, travelCost, walkFromExit, totalCost, directDistance);
+
+                // Transport is beneficial if total walking is less than walking directly
+                // (ignore ride time - guest wants to sit/rest rather than walk)
+                int32_t totalWalking = walkToEntrance + walkFromExit;
+                bool savesWalking = totalWalking < directDistance;
+                bool worthwhile = savesWalking;
 
                 if (worthwhile && totalCost < bestTotalCost)
                 {
@@ -2295,13 +2308,13 @@ namespace OpenRCT2::PathFinding
                     bestTotalCost = totalCost;
 
                     LogPathfinding(
-                        &guest, "Transport candidate: %s station %d, cost=%d (exitDist=%d < currentDist=%d)",
-                        ride.getName().c_str(), stationIdx, totalCost, walkFromExit, directDistance);
+                        &guest, "Transport candidate: %s station %d, cost=%d (totalWalk=%d < direct=%d)",
+                        ride.getName().c_str(), stationIdx, totalCost, totalWalking, directDistance);
                 }
                 else
                 {
-                    LogPathfinding(&guest, "    Station %d: NOT selected (exitCloser=%d, entranceOK=%d, cost=%d vs best=%d)",
-                        stationIdx, exitCloser ? 1 : 0, entranceReasonable ? 1 : 0, totalCost, bestTotalCost);
+                    LogPathfinding(&guest, "    Station %d: NOT selected (savesWalking=%d, totalWalk=%d, direct=%d, cost=%d vs best=%d)",
+                        stationIdx, savesWalking ? 1 : 0, totalWalking, directDistance, totalCost, bestTotalCost);
                 }
             }
         }
@@ -2390,6 +2403,8 @@ namespace OpenRCT2::PathFinding
                         peep.GuestTransportDestination = peep.GuestHeadingToRideId;
                         // Set destination to transport ride
                         peep.GuestHeadingToRideId = transportRide;
+                        // Store which station to board at (calculated based on exit proximity to goal)
+                        peep.GuestTransportTargetStation = stationIndex;
                         peep.PeepFlags |= PEEP_FLAGS_TRANSPORT_SHORTCUT;
                         peep.GuestIsLostCountdown = 200;
                         peep.ResetPathfindGoal();
@@ -2613,6 +2628,20 @@ namespace OpenRCT2::PathFinding
         // Ride has no stations with an entrance, so head to station 0.
         if (numEntranceStations == 0)
             closestStationNum = StationIndex::FromUnderlying(0);
+
+        // If using transport shortcut with a pre-selected target station, use that instead of heuristic
+        if ((peep.PeepFlags & PEEP_FLAGS_TRANSPORT_SHORTCUT) && !peep.GuestTransportTargetStation.IsNull()
+            && ride->id == peep.GuestHeadingToRideId)
+        {
+            auto targetIdx = peep.GuestTransportTargetStation.ToUnderlying();
+            // Verify the target station has an entrance we can use
+            if (targetIdx < entranceStations.size() && entranceStations[targetIdx])
+            {
+                closestStationNum = peep.GuestTransportTargetStation;
+                LogPathfinding(
+                    &peep, "Using pre-selected transport station %d instead of heuristic station", targetIdx);
+            }
+        }
 
         if (numEntranceStations > 1 && (ride->departFlags & RIDE_DEPART_SYNCHRONISE_WITH_ADJACENT_STATIONS))
         {

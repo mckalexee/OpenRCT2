@@ -1799,6 +1799,7 @@ void Guest::OnExitRide(Ride& ride)
         PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT; // Clear flag
         GuestHeadingToRideId = GuestTransportDestination;
         GuestTransportDestination = RideId::GetNull();
+        GuestTransportTargetStation = StationIndex::GetNull();
         GuestIsLostCountdown = 200;
         ResetPathfindGoal();
 
@@ -2467,6 +2468,7 @@ void Guest::ChoseNotToGoOnRide(const Ride& ride, bool peepAtRide, bool updateLas
             PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
             GuestHeadingToRideId = GuestTransportDestination;
             GuestTransportDestination = RideId::GetNull();
+            GuestTransportTargetStation = StationIndex::GetNull();
             GuestIsLostCountdown = 200;
             ResetPathfindGoal();
             WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
@@ -2515,6 +2517,7 @@ static void GuestTriedToEnterFullQueue(Guest& guest, Ride& ride)
             guest.PeepFlags &= ~PEEP_FLAGS_TRANSPORT_SHORTCUT;
             guest.GuestHeadingToRideId = guest.GuestTransportDestination;
             guest.GuestTransportDestination = RideId::GetNull();
+            guest.GuestTransportTargetStation = StationIndex::GetNull();
             guest.GuestIsLostCountdown = 200;
             guest.ResetPathfindGoal();
             guest.WindowInvalidateFlags |= PEEP_INVALIDATE_PEEP_ACTION;
